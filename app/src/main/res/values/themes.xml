@@ -1,0 +1,6 @@
+<resources>
+    <!-- Minimal pre-Compose window theme (needs no extra Material Components
+         dependency). Actual theming/colors live in ui/Theme.kt via Compose's
+         MaterialTheme, not here. -->
+    <style name="Theme.CouchMode" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

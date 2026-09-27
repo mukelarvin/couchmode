@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:name=".CouchModeApplication"
+        android:allowBackup="true"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.CouchMode">
+
+        <!-- TODO (Phase 1 follow-up): add a launcher icon via Android Studio's
+             Image Asset wizard, then set android:icon here. -->
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Required by Shizuku for the app to receive its Binder connection.
+             Boilerplate per https://github.com/RikkaApps/Shizuku-API docs —
+             do not add app-specific logic here. -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+        <!-- Phase 8 will add: BootReceiver here — see PLAN.md -->
+
+    </application>
+
+</manifest>
