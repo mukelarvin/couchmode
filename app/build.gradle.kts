@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
+    // No org.jetbrains.kotlin.android here: AGP 9+ has built-in Kotlin support
+    // and rejects that plugin. See https://kotl.in/gradle/agp-built-in-kotlin
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
@@ -16,6 +17,11 @@ val releaseKeyPassword = System.getenv("RELEASE_KEY_PASSWORD")
 
 android {
     namespace = "com.couchmode.app"
+
+    // compileSdk is the API level the code is *compiled against*, not the
+    // Android version the app runs on. It must be at least as new as what the
+    // dependencies (Compose, androidx) were built against, so keep it high.
+    // The app still runs fine on an Android 13 device because minSdk = 26.
     compileSdk = 36
 
     defaultConfig {
@@ -51,13 +57,12 @@ android {
         }
     }
 
+    // With built-in Kotlin, the Kotlin jvmTarget defaults to this, so the old
+    // kotlinOptions { jvmTarget = "17" } block is no longer needed (and no
+    // longer exists without the kotlin-android plugin).
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    kotlinOptions {
-        jvmTarget = "17"
     }
 
     buildFeatures {
@@ -66,7 +71,11 @@ android {
         // shizuku/InputReader.kt to build UserServiceArgs (Phase 2). AGP 9
         // no longer generates BuildConfig by default.
         buildConfig = true
+        // AIDL codegen is off by default since AGP 8.0. Needed to generate
+        // com.couchmode.app.ipc.IInputService from src/main/aidl (Phase 2).
+        aidl = true
     }
+    buildToolsVersion = "36.0.0"
 }
 
 dependencies {

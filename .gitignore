@@ -1,12 +1,39 @@
-*.iml
+# Gradle
 .gradle/
-/local.properties
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Local configuration (SDK paths etc. — machine specific)
+local.properties
+
+# Android Studio / IntelliJ
 .idea/
-.DS_Store
-/build/
-/captures/
+*.iml
+captures/
+
+# Native build output
 .externalNativeBuild/
 .cxx/
+
+# Signing keys and credentials — never commit these (see RELEASING.md)
 *.keystore
 *.jks
 release.properties
+
+# Generated / packaged artifacts
+*.apk
+*.aab
+*.ap_
+*.dex
+output-metadata.json
+
+# Logs and crash dumps
+*.log
+hs_err_pid*
+
+# Kotlin
+.kotlin/
+
+# OS files
+.DS_Store
+Thumbs.db
