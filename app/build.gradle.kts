@@ -76,6 +76,24 @@ android {
         aidl = true
     }
     buildToolsVersion = "36.0.0"
+
+    // gamepad_merger, the root/shell daemon (see daemon/). It is built as an
+    // executable but named libgamepad_merger.so so Android packages it under
+    // lib/<abi>/; legacy packaging makes the installer extract it to
+    // applicationInfo.nativeLibraryDir, where the launch script can run it.
+    ndkVersion = "30.0.16248370"
+    externalNativeBuild {
+        cmake {
+            path = file("../daemon/CMakeLists.txt")
+            version = "4.1.2"
+        }
+    }
+    defaultConfig {
+        ndk { abiFilters += "arm64-v8a" }
+    }
+    packaging {
+        jniLibs { useLegacyPackaging = true }
+    }
 }
 
 dependencies {

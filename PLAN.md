@@ -49,6 +49,26 @@ just status + resume points, not the design doc.
 
 ## Session log
 
+### 2026-09-29 (c) — CI green, daemon wired into Gradle (Claude Code)
+
+- Generated the Gradle wrapper (9.7.1) and marked `gradlew` executable
+  (`git update-index --chmod=+x`; Windows doesn't record it, CI failed with
+  exit 126 until then). `ci.yml` now passes (assembleDebug + lint). Bumped
+  checkout/setup-java to v5 in both workflows.
+- Repo is public: https://github.com/mukelarvin/couchmode. `.gitattributes`
+  keeps .sh/.c/CMakeLists/gradlew as LF. Git author for this repo is
+  `Mukelarvin <mukelarvin@gmail.com>` (matches the GitHub account).
+- `app/build.gradle.kts`: `externalNativeBuild` -> `daemon/CMakeLists.txt`,
+  NDK 30.0.16248370, CMake 4.1.2, abiFilters arm64-v8a, `useLegacyPackaging`.
+  The daemon target is named `libgamepad_merger.so` so AGP packages it in
+  `lib/arm64-v8a/`; legacy packaging makes the installer extract it to the
+  app's `nativeLibraryDir`. Confirmed present in the debug APK.
+- **Not yet verified on device** (handheld wasn't on adb): that the extracted
+  `libgamepad_merger.so` is executable/runnable from that dir (as shell, and
+  as root via the menu). Next: adb install, run it from
+  `$(dirname $(pm path com.couchmode.app))/lib/arm64/libgamepad_merger.so`.
+- Then: multi-source priority, control channel, Phase 4 UI.
+
 ### 2026-09-29 (b) â€” gamepad_merger first cut written, NOT compiled (Claude Code)
 
 - Ran the no-root check over adb: as the `shell` user, `/dev/uinput` **opens
