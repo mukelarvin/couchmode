@@ -40,7 +40,7 @@ fun DaemonScreen(modifier: Modifier = Modifier) {
     var running by remember { mutableStateOf<Boolean?>(null) }
     var status by remember { mutableStateOf<DaemonStatus?>(null) }
     var devices by remember { mutableStateOf<List<PadDevice>>(emptyList()) }
-    var watching by remember { mutableStateOf<String?>(null) }
+    var watching by remember { mutableStateOf<PadDevice?>(null) }
     var watchError by remember { mutableStateOf<String?>(null) }
     val values: SnapshotStateMap<String, Int> = remember { mutableStateMapOf() }
 
@@ -59,9 +59,9 @@ fun DaemonScreen(modifier: Modifier = Modifier) {
     LaunchedEffect(watching) {
         values.clear()
         watchError = null
-        val name = watching ?: return@LaunchedEffect
+        val device = watching ?: return@LaunchedEffect
         try {
-            DaemonClient.sniff(name).collect { ev -> values[EvdevNames.name(ev.type, ev.code)] = ev.value }
+            DaemonClient.sniff(device).collect { ev -> values[EvdevNames.name(ev.type, ev.code)] = ev.value }
             watchError = "device disappeared"
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
@@ -93,14 +93,14 @@ fun DaemonScreen(modifier: Modifier = Modifier) {
                 Text(device.name + if (device.isSource) "  [source]" else "")
                 Text(device.id)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { watching = if (watching == device.name) null else device.name }) {
-                        Text(if (watching == device.name) "Stop watching" else "Watch")
+                    OutlinedButton(onClick = { watching = if (watching == device) null else device }) {
+                        Text(if (watching == device) "Stop watching" else "Watch")
                     }
                     OutlinedButton(
                         enabled = !device.isSource,
                         onClick = {
                             scope.launch {
-                                runCatching { DaemonClient.setSource(device.name) }
+                                runCatching { DaemonClient.setSource(device) }
                                 refresh++
                             }
                         },

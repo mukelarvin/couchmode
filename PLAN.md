@@ -49,6 +49,28 @@ just status + resume points, not the design doc.
 
 ## Session log
 
+### 2026-09-29 (e) — digital-trigger synthesis + ambiguous device names (Claude Code)
+
+- Luke's 8BitDo (Bluetooth, Switch mode) forwarded as source works in Dolphin
+  except the shoulder triggers. Cause: it sends only digital BTN_TL2/TR2, while
+  emulators read analog ABS_BRAKE/ABS_GAS.
+- Daemon now synthesizes ABS_BRAKE (left) / ABS_GAS (right) from BTN_TL2/TR2,
+  instant 0/max (no ramping), until the source is seen sending that real analog
+  axis. Declared axes are NOT trusted: the vendor's virtual "Nintendo Switch Pro
+  Controller" declares GAS/BRAKE but never drives them. The virtual device
+  always declares GAS/BRAKE (0..32767) even for a digital-only first source.
+  **Written and builds; not yet confirmed in Dolphin.**
+- **Two devices can share a name.** The Retroid service creates a virtual
+  "Nintendo Switch Pro Controller" (bus 0003, 2022:3001 v0064, Z/RZ layout,
+  same ranges as the onboard pad) alongside the real BT pad (bus 0005,
+  057e:2009, ABS_RX/RY). Matching is now name + `bus:vendor:product:version`
+  (SOURCE/SNIFF take `name<TAB>id`; the app passes both). Earlier "8BitDo"
+  sniff results were actually the vendor's virtual copy (event11). The real
+  pad node (event9) disappeared mid-session (BT sleep?) and wasn't sniffed.
+  Open question: use the vendor's virtual copy (already normalized) or the
+  raw BT node (needs our own normalization)? Depends on whether the vendor copy
+  is stable/always present.
+
 ### 2026-09-29 (d) — app <-> daemon channel (Claude Code)
 
 - Channel: abstract unix socket `@couchmode`, line-based text protocol

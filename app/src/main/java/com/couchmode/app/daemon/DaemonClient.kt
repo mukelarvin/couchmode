@@ -14,7 +14,12 @@ import kotlin.concurrent.thread
 
 data class PadDevice(val name: String, val id: String, val isSource: Boolean)
 
-data class DaemonStatus(val source: String, val sourceConnected: Boolean, val virtualName: String)
+data class DaemonStatus(
+    val source: String,
+    val sourceConnected: Boolean,
+    val virtualName: String,
+    val sourceId: String,
+)
 
 data class RawEvent(val type: Int, val code: Int, val value: Int)
 
@@ -63,7 +68,12 @@ object DaemonClient {
 
     suspend fun status(): DaemonStatus {
         val f = request("STATUS").first().split('\t')
-        return DaemonStatus(source = f[1], sourceConnected = f[2] == "1", virtualName = f[3])
+        return DaemonStatus(
+            source = f[1],
+            sourceConnected = f[2] == "1",
+            virtualName = f[3],
+            sourceId = f.getOrElse(4) { "" },
+        )
     }
 
     suspend fun listDevices(): List<PadDevice> =
@@ -72,17 +82,18 @@ object DaemonClient {
             if (f.size == 4 && f[0] == "D") PadDevice(f[1], f[2], f[3] == "1") else null
         }
 
-    suspend fun setSource(name: String) {
-        check(request("SOURCE $name").firstOrNull() == "OK") { "daemon rejected SOURCE" }
+    /** Devices are identified by name plus id: a pad and the vendor's virtual copy can share a name. */
+    suspend fun setSource(device: PadDevice) {
+        check(request("SOURCE ${device.name}\t${device.id}").firstOrNull() == "OK") { "daemon rejected SOURCE" }
     }
 
     /**
-     * Streams raw key/axis events from the named device until the collector is
+     * Streams raw key/axis events from the device until the collector is
      * cancelled. Uses its own connection; closing it stops the sniff daemon-side.
      */
-    fun sniff(name: String): Flow<RawEvent> = callbackFlow {
+    fun sniff(device: PadDevice): Flow<RawEvent> = callbackFlow {
         val socket = connect(timeoutMs = 0)
-        socket.outputStream.write("SNIFF $name\n".toByteArray())
+        socket.outputStream.write("SNIFF ${device.name}\t${device.id}\n".toByteArray())
         val reader = BufferedReader(InputStreamReader(socket.inputStream))
         val worker = thread(name = "couchmode-sniff") {
             try {

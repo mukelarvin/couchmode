@@ -10,11 +10,13 @@
 // line-based text protocol, one request per line:
 //
 //   PING                  -> PONG
-//   STATUS                -> S<TAB>source<TAB>connected(0/1)<TAB>virtual
+//   STATUS                -> S<TAB>source<TAB>connected(0/1)<TAB>virtual<TAB>sourceId
 //   LIST                  -> D<TAB>name<TAB>bus:vendor:product:version<TAB>isSource(0/1)
 //                            ... then END       (gamepad-looking devices only)
-//   SOURCE <name>         -> OK     switch the forwarded source device
-//   SNIFF <name>          -> OK|ERR ...  then "E type code value" lines for
+//   SOURCE <name>[<TAB>id] -> OK    switch the forwarded source device. The optional id
+//                            ("bus:vendor:product:version") disambiguates devices
+//                            that share a name (e.g. a pad and the vendor's virtual copy).
+//   SNIFF <name>[<TAB>id] -> OK|ERR ...  then "E type code value" lines for
 //                            every EV_KEY/EV_ABS event; "GONE" if the device
 //                            disappears. Works on the current source too (a
 //                            grabbed device can't be opened twice, so we tap
@@ -66,11 +68,15 @@ static volatile sig_atomic_t g_stop = 0;
 static int g_stats = 0;            // -t
 static int g_allowed_uid = -1;     // -u; -1 = accept any client
 static char g_source_name[NAME_LEN] = DEFAULT_SOURCE_NAME;
+static char g_source_id[32] = "";  // optional "bus:vendor:product:version" (hex) to tell same-named devices apart
 static const char *g_virtual_name = DEFAULT_VIRTUAL_NAME;
 
 static int g_src = -1;             // grabbed source device, or -1 if not present
 static int g_ui = -1;              // uinput fd; created once, kept for the process lifetime
 static int g_dropping = 0;         // discarding events until the next SYN_REPORT after SYN_DROPPED
+static int g_synth_triggers = 0;   // source has BTN_TL2/TR2 buttons: synthesize ABS_BRAKE/ABS_GAS from them...
+static int g_analog_seen[2];       // ...until the source actually sends that analog axis (0 = BRAKE, 1 = GAS)
+static int g_trigger_max = 32767;  // full-press value of the virtual device's ABS_GAS/ABS_BRAKE
 
 static void on_signal(int sig) {
     (void)sig;
@@ -121,8 +127,13 @@ static void report_stats(void) {
 
 // ---- device discovery -----------------------------------------------------
 
-// Opens the first /dev/input/event* whose EVIOCGNAME equals `name`. Returns fd or -1.
-static int open_by_name(const char *name) {
+static void format_id(const struct input_id *id, char *out, size_t n) {
+    snprintf(out, n, "%04x:%04x:%04x:%04x", id->bustype, id->vendor, id->product, id->version);
+}
+
+// Opens the first /dev/input/event* whose EVIOCGNAME equals `name` (and, if
+// `id` is non-empty, whose bus:vendor:product:version matches). Returns fd or -1.
+static int open_by_name(const char *name, const char *id) {
     DIR *d = opendir("/dev/input");
     if (!d) {
         logf_("opendir /dev/input: %s", strerror(errno));
@@ -137,7 +148,11 @@ static int open_by_name(const char *name) {
         int fd = open(path, O_RDONLY | O_CLOEXEC);
         if (fd < 0) continue;
         char devname[NAME_LEN] = {0};
-        if (ioctl(fd, EVIOCGNAME(sizeof(devname) - 1), devname) >= 0 && strcmp(devname, name) == 0) {
+        struct input_id iid;
+        char idstr[32] = "";
+        if (ioctl(fd, EVIOCGID, &iid) == 0) format_id(&iid, idstr, sizeof(idstr));
+        if (ioctl(fd, EVIOCGNAME(sizeof(devname) - 1), devname) >= 0 && strcmp(devname, name) == 0 &&
+            (id[0] == 0 || strcmp(id, idstr) == 0)) {
             found = fd;
             break;
         }
@@ -208,6 +223,29 @@ static int create_virtual_from(int src, const char *vname) {
         }
     }
 
+    // The virtual device always has analog triggers (canonical layout, see
+    // spec.md), even if this source is digital-only; those get synthesized.
+    ioctl(ui, UI_SET_EVBIT, EV_ABS);
+    ioctl(ui, UI_SET_EVBIT, EV_KEY);
+    for (int i = 0; i < 2; i++) {
+        int code = i == 0 ? ABS_GAS : ABS_BRAKE;
+        unsigned long have[NLONGS(ABS_MAX + 1)] = {0};
+        ioctl(src, EVIOCGBIT(EV_ABS, sizeof(have)), have);
+        if (TEST_BIT(code, have)) {
+            struct input_absinfo info;
+            if (ioctl(src, EVIOCGABS(code), &info) == 0) g_trigger_max = info.maximum;
+            continue;  // already declared from the source above
+        }
+        struct uinput_abs_setup as;
+        memset(&as, 0, sizeof(as));
+        as.code = code;
+        as.absinfo.maximum = g_trigger_max;
+        if (ioctl(ui, UI_SET_ABSBIT, code) < 0 || ioctl(ui, UI_ABS_SETUP, &as) < 0) {
+            logf_("trigger abs setup %d: %s", code, strerror(errno));
+            goto fail;
+        }
+    }
+
     struct uinput_setup us;
     memset(&us, 0, sizeof(us));
     us.id.bustype = BUS_VIRTUAL;
@@ -263,12 +301,25 @@ static void send_event_line(struct client *c, const struct input_event *ev) {
     if (send_str(c->fd, line) < 0) drop_client(c);
 }
 
+// Splits "name<TAB>id" in place; returns the id ("" if absent).
+static char *split_id(char *arg) {
+    char *tab = strchr(arg, '\t');
+    if (!tab) return arg + strlen(arg);
+    *tab = 0;
+    return tab + 1;
+}
+
+static int is_source(const char *name, const char *id) {
+    return strcmp(name, g_source_name) == 0 && (g_source_id[0] == 0 || strcmp(id, g_source_id) == 0);
+}
+
 static void handle_line(struct client *c, char *line) {
     if (strcmp(line, "PING") == 0) {
         send_str(c->fd, "PONG\n");
     } else if (strcmp(line, "STATUS") == 0) {
         char out[NAME_LEN * 2 + 32];
-        snprintf(out, sizeof(out), "S\t%s\t%d\t%s\n", g_source_name, g_src >= 0, g_virtual_name);
+        snprintf(out, sizeof(out), "S\t%s\t%d\t%s\t%s\n", g_source_name, g_src >= 0, g_virtual_name,
+                 g_source_id);
         send_str(c->fd, out);
     } else if (strcmp(line, "LIST") == 0) {
         DIR *d = opendir("/dev/input");
@@ -285,8 +336,9 @@ static void handle_line(struct client *c, char *line) {
                 ioctl(fd, EVIOCGID, &id) >= 0 && strcmp(name, g_virtual_name) != 0 &&
                 looks_like_gamepad(fd)) {
                 char out[NAME_LEN + 64];
-                snprintf(out, sizeof(out), "D\t%s\t%04x:%04x:%04x:%04x\t%d\n", name, id.bustype,
-                         id.vendor, id.product, id.version, strcmp(name, g_source_name) == 0);
+                char idstr[32];
+                format_id(&id, idstr, sizeof(idstr));
+                snprintf(out, sizeof(out), "D\t%s\t%s\t%d\n", name, idstr, is_source(name, idstr));
                 send_str(c->fd, out);
             }
             close(fd);
@@ -294,8 +346,10 @@ static void handle_line(struct client *c, char *line) {
         if (d) closedir(d);
         send_str(c->fd, "END\n");
     } else if (strncmp(line, "SOURCE ", 7) == 0) {
+        char *id = split_id(line + 7);
         snprintf(g_source_name, sizeof(g_source_name), "%s", line + 7);
-        logf_("source set to \"%s\"", g_source_name);
+        snprintf(g_source_id, sizeof(g_source_id), "%s", id);
+        logf_("source set to \"%s\" [%s]", g_source_name, g_source_id);
         if (g_src >= 0) {  // detach now; the main loop reattaches by the new name
             ioctl(g_src, EVIOCGRAB, 0);
             close(g_src);
@@ -305,10 +359,11 @@ static void handle_line(struct client *c, char *line) {
     } else if (strncmp(line, "SNIFF ", 6) == 0) {
         stop_sniff(c);
         const char *name = line + 6;
-        if (strcmp(name, g_source_name) == 0) {
+        const char *id = split_id(line + 6);
+        if (is_source(name, id) || (strcmp(name, g_source_name) == 0 && id[0] == 0)) {
             c->sniff_source = 1;
             send_str(c->fd, "OK\n");
-        } else if ((c->sniff_fd = open_by_name(name)) >= 0) {
+        } else if ((c->sniff_fd = open_by_name(name, id)) >= 0) {
             send_str(c->fd, "OK\n");
         } else {
             send_str(c->fd, "ERR notfound\n");
@@ -398,7 +453,7 @@ static void detach_source(void) {
 // Opens, configures and grabs the source device. Creates the virtual device on
 // first success. Returns -1 only on a fatal (virtual device) error.
 static int attach_source(void) {
-    int src = open_by_name(g_source_name);
+    int src = open_by_name(g_source_name, g_source_id);
     if (src < 0) return 0;  // not present; caller retries later
     logf_("found source \"%s\"", g_source_name);
     if (g_ui < 0) {
@@ -417,6 +472,16 @@ static int attach_source(void) {
     // Grab so apps see only the virtual device, not the physical one too.
     if (ioctl(src, EVIOCGRAB, 1) < 0)
         logf_("EVIOCGRAB failed (%s); apps will see both devices", strerror(errno));
+    unsigned long absbits[NLONGS(ABS_MAX + 1)] = {0};
+    unsigned long keybits[NLONGS(KEY_MAX + 1)] = {0};
+    ioctl(src, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits);
+    ioctl(src, EVIOCGBIT(EV_KEY, sizeof(keybits)), keybits);
+    // Declared axes don't prove the source drives them (the Retroid's virtual
+    // "Nintendo Switch Pro Controller" declares GAS/BRAKE but only sends the
+    // digital buttons), so synthesize until real analog events show up.
+    (void)absbits;
+    g_synth_triggers = TEST_BIT(BTN_TL2, keybits) || TEST_BIT(BTN_TR2, keybits);
+    g_analog_seen[0] = g_analog_seen[1] = 0;
     g_src = src;
     g_dropping = 0;
     return 0;
@@ -453,6 +518,21 @@ static int pump_source(void) {
             if (errno == EAGAIN || errno == EINTR) continue;
             logf_("write uinput: %s", strerror(errno));
             return -1;
+        }
+        if (ev->type == EV_ABS && ev->code == ABS_BRAKE) g_analog_seen[0] = 1;
+        if (ev->type == EV_ABS && ev->code == ABS_GAS) g_analog_seen[1] = 1;
+        if (g_synth_triggers && ev->type == EV_KEY && (ev->code == BTN_TL2 || ev->code == BTN_TR2) &&
+            !g_analog_seen[ev->code == BTN_TL2 ? 0 : 1]) {
+            // Android convention: left trigger = ABS_BRAKE, right = ABS_GAS. Instant 0/max, no ramping.
+            struct input_event ax;
+            memset(&ax, 0, sizeof(ax));
+            ax.type = EV_ABS;
+            ax.code = ev->code == BTN_TL2 ? ABS_BRAKE : ABS_GAS;
+            ax.value = ev->value ? g_trigger_max : 0;
+            if (write(g_ui, &ax, sizeof(ax)) < 0 && errno != EAGAIN && errno != EINTR) {
+                logf_("write uinput: %s", strerror(errno));
+                return -1;
+            }
         }
         if (g_stats && ev->type == EV_SYN && ev->code == SYN_REPORT) {
             long t_src = ev->time.tv_sec * 1000000L + ev->time.tv_usec;
