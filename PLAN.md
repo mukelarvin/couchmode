@@ -107,6 +107,33 @@ re-mapping Dolphin the A/B and X/Y pairs were swapped. Investigation:
 - (Superseded) experiment with the virtual device's bus/vendor/name to see if the
   service still clones it; sniff source vs copy for the button layout.
 
+- **RsMapping investigation (read-only, from the APK pulled off the device;
+  conclusions come from class/symbol names, not from running or decompiling
+  it).** `/system/app/RsMapping` = `com.rp.mapping` v3.0, runs as uid system,
+  native lib `librsinput.so`. It is Retroid's input engine:
+  - It talks to the handheld's MCU (`MCUInit`, `sendDataToMCU`, `updateMCU`),
+    and creates the virtual devices through uinput: gamepad
+    (`NativeGamepadDevice`, with `nativeSetName`, sticks, GAS/BRAKE), mouse
+    ("Retroid Pocket Virtual Mouse"), keyboard, touchscreen. Vendor 2022:3001
+    comes from `get_gamepad_vendor/product`. So the onboard controls are NOT a
+    kernel evdev device; "Retroid Pocket Controller" is RsMapping's output.
+    => The onboard pad can't be bypassed; only external pads can.
+  - Features: controller style (`persist.sys.gamepad.type` 0/1/2), analog vs
+    digital trigger mode (`setTriggerAnalogEnabled/DigitalEnabled`), stick
+    calibration and deadzones, gamepad -> key/mouse/touch mapping, macros, gyro.
+  - It "subscribes" to other input devices (`refreshSubscribedInputFds/Ids`),
+    identifies devices by unique info (`RsDeviceManage.DeviceUniqInfo`), and can
+    rename its virtual gamepad. Consistent with the single sticky renamed copy
+    seen on device. Not proven that this is the copier or what makes it pick
+    a device.
+  - Leads not yet followed: a resource named `hold_devices_black_list`
+    (unknown use; not a live Settings key on this device).
+  - Bypass options: input side - select the RAW external node (e.g. the bus-0005
+    Switch Pro pad) instead of RsMapping's copy (needs our own normalization:
+    RX/RY vs Z/RZ, digital triggers - triggers already handled). Output side -
+    still need to learn when it adopts our device (seems to be only when no
+    other external pad is connected).
+
 ### 2026-09-29 (e) — digital-trigger synthesis + ambiguous device names (Claude Code)
 
 - Luke's 8BitDo (Bluetooth, Switch mode) forwarded as source works in Dolphin
