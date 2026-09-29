@@ -49,6 +49,39 @@ just status + resume points, not the design doc.
 
 ## Session log
 
+### 2026-09-29 (f) — the Retroid service clones every gamepad, including ours (Claude Code)
+
+Luke unplugged the BT pad (no fallback - expected, single-source only), replugged
+it, Dolphin's "Android/N/CouchMode..." number changed 2 -> 3, and after
+re-mapping Dolphin the A/B and X/Y pairs were swapped. Investigation:
+
+- The daemon never restarted (one "created virtual device" in its log), so it
+  did not renumber anything.
+- `/proc/bus/input/devices` shows TWO "CouchMode Virtual Gamepad" devices: ours
+  (bus 0006, 1209:c0de) and a copy with the Retroid's own ID (bus 0003,
+  2022:3001, version 0064, sysfs /devices/virtual/input). The same happened
+  earlier with "Nintendo Switch Pro Controller" (that was the copy, not the pad).
+- `/dev/input/eventN` for OUR device does not exist (kernel lists the handler;
+  the node is gone) while the copy's node exists. `dumpsys input` lists only
+  the copy (with VIBRATOR class); our device is not in Android's EventHub.
+  => **Android apps have only ever seen the vendor's copy of our device.**
+  Hypothesis (not proven): a Retroid service creates a re-mapped virtual copy of
+  each external gamepad, removes/hides the original node, and re-creates its own
+  devices (even "Retroid Pocket Controller" went input7 -> input28) whenever a
+  pad connects/disconnects.
+- Dolphin's "Android/N/" is Android's per-device ControllerNumber (first free
+  slot), so it changes whenever the vendor re-creates devices.
+- The A/B, X/Y swap is probably the vendor's layout remapping (the classic vs
+  Xbox toggle from CLAUDE.md) applied to the copy. Unverified: need to compare
+  the physical button -> code seen on the source vs on the copy.
+- Consequences: our "one stable device" is currently stable only up to the
+  vendor's copy. Need to learn what triggers cloning (name? bus? sysfs path?
+  class?) and whether our device can avoid it, e.g. different bus/vendor, or
+  a name the service ignores. The daemon's LIST hides devices named like ours,
+  so it can't select the copy of itself as a source (feedback loop guard).
+- Next: experiment with the virtual device's bus/vendor/name to see if the
+  service still clones it; sniff source vs copy for the button layout.
+
 ### 2026-09-29 (e) — digital-trigger synthesis + ambiguous device names (Claude Code)
 
 - Luke's 8BitDo (Bluetooth, Switch mode) forwarded as source works in Dolphin
