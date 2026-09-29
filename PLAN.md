@@ -71,6 +71,21 @@ just status + resume points, not the design doc.
   raw BT node (needs our own normalization)? Depends on whether the vendor copy
   is stable/always present.
 
+- **Confirmed by Luke in Dolphin:** with the Pro Controller as source the
+  shoulders work (binary); switching back to the Retroid source keeps its
+  analog triggers working.
+- **TODO: rumble.** Nothing forwards force feedback yet. The Retroid's own
+  motor (`qcom-hv-haptics`, FF_RUMBLE) buzzes while a BT pad is in use, and
+  games get no rumble on the BT pad through our virtual device. Needs: declare
+  FF_RUMBLE on the virtual device, handle uinput UI_FF_UPLOAD/ERASE, and route
+  effects to the *active* source's FF (BT pad or the haptics node), not the
+  handheld's motor. Also find out why the handheld vibrates now (probably the
+  vendor service mirroring rumble to its own motor).
+- Retroid-specific vs generic (Luke's question): matching, source switching,
+  and event forwarding are generic. Still Retroid-shaped: default source name,
+  virtual device capabilities copied from the first source (should become a
+  fixed canonical layout), and reliance on the vendor's virtual pad copy.
+
 ### 2026-09-29 (d) — app <-> daemon channel (Claude Code)
 
 - Channel: abstract unix socket `@couchmode`, line-based text protocol
