@@ -79,7 +79,32 @@ re-mapping Dolphin the A/B and X/Y pairs were swapped. Investigation:
   class?) and whether our device can avoid it, e.g. different bus/vendor, or
   a name the service ignores. The daemon's LIST hides devices named like ours,
   so it can't select the copy of itself as a source (feedback loop guard).
-- Next: experiment with the virtual device's bus/vendor/name to see if the
+- **CORRECTION / experiments (same day, no button presses needed - test
+  devices were made with a throwaway uinput tool):**
+  - Test gamepads with bus virtual/USB/BT and various vendor IDs (incl. Xbox
+    045e:028e and Nintendo 057e:2009) were NOT copied or hidden. Device IDs
+    are not the trigger.
+  - There is exactly ONE Retroid copy (2022:3001 v0064) at a time. It mirrors a
+    single external gamepad and is sticky: it kept mirroring the same device
+    until that device disappeared, then re-created itself on the next one.
+    Stopping the daemon moved the copy from "CouchMode Virtual Gamepad" to the
+    real "Nintendo Switch Pro Controller"; restarting the daemon did NOT make it
+    copy ours again.
+  - Working theory: when the BT pad was unplugged, ours was the only external
+    gamepad, so the service mirrored ours and hid its /dev/input node; apps then
+    saw only the copy. With the BT pad connected first (now), the copy targets
+    the pad and Android sees OUR device directly (`dumpsys input` path
+    /dev/input/event12, stable for 60s+). So the "Android has only ever seen the
+    copy" statement above was only true during that window.
+  - Likely cause of the swapped A/B, X/Y: Luke re-mapped Dolphin while the copy
+    (vendor layer in the middle) was the device it saw; now Dolphin sees our
+    device directly. Still unverified.
+  - Implication: which device apps see (ours vs a vendor copy of ours) depends
+    on which external gamepads are connected. Dolphin's `Android/N/` slot also
+    changes. Treat any binding made while a copy is in the path as suspect.
+    Re-check with the BT pad off (our device may get copied again).
+
+- (Superseded) experiment with the virtual device's bus/vendor/name to see if the
   service still clones it; sniff source vs copy for the button layout.
 
 ### 2026-09-29 (e) — digital-trigger synthesis + ambiguous device names (Claude Code)
