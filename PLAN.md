@@ -63,10 +63,7 @@ just status + resume points, not the design doc.
   The daemon target is named `libgamepad_merger.so` so AGP packages it in
   `lib/arm64-v8a/`; legacy packaging makes the installer extract it to the
   app's `nativeLibraryDir`. Confirmed present in the debug APK.
-- **Not yet verified on device** (handheld wasn't on adb): that the extracted
-  `libgamepad_merger.so` is executable/runnable from that dir (as shell, and
-  as root via the menu). Next: adb install, run it from
-  `$(dirname $(pm path com.couchmode.app))/lib/arm64/libgamepad_merger.so`.
+- **Verified on device:** `adb install` extracts `libgamepad_merger.so` to the app's `nativeLibraryDir` (`.../lib/arm64/`, mode 755), and running it from there as the shell user finds event7 and creates the virtual device. Not yet tried via the root menu.
 - Then: multi-source priority, control channel, Phase 4 UI.
 
 ### 2026-09-29 (b) — gamepad_merger first cut written, NOT compiled (Claude Code)
