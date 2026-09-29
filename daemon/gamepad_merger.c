@@ -50,6 +50,7 @@
 
 #define DEFAULT_SOURCE_NAME "Retroid Pocket Controller"
 #define DEFAULT_VIRTUAL_NAME "CouchMode Virtual Gamepad"
+#define DECOY_NAME "CouchMode Decoy (ignore)"
 #define SOCKET_NAME "couchmode"
 // Stable identity for the virtual device (pid.codes test VID, arbitrary PID).
 #define VIRTUAL_VENDOR 0x1209
@@ -73,6 +74,7 @@ static const char *g_virtual_name = DEFAULT_VIRTUAL_NAME;
 
 static int g_src = -1;             // grabbed source device, or -1 if not present
 static int g_ui = -1;              // uinput fd; created once, kept for the process lifetime
+static int g_decoy = -1;           // decoy gamepad, see create_decoy()
 static int g_dropping = 0;         // discarding events until the next SYN_REPORT after SYN_DROPPED
 static int g_synth_triggers = 0;   // source has BTN_TL2/TR2 buttons: synthesize ABS_BRAKE/ABS_GAS from them...
 static int g_analog_seen[2];       // ...until the source actually sends that analog axis (0 = BRAKE, 1 = GAS)
@@ -265,6 +267,50 @@ fail:
     return -1;
 }
 
+// Retroid's RsMapping service adopts ONE gamepad-like device at a time: it
+// creates its own re-mapped copy under the same name and hides the original's
+// /dev/input node, so apps would see the copy instead of our virtual gamepad
+// (with vendor button layout, and a different device number every time the set
+// of pads changes). It sticks to the first device it adopts until that
+// disappears, and adopts whatever gamepad-like device appears first when no
+// external pad is present. So we create a silent decoy first; RsMapping adopts
+// that and leaves the real virtual gamepad alone. Observed on a Retroid Pocket
+// Nova; there is no setting for this that we know of. Never sends any events.
+static int create_decoy(void) {
+    int ui = open("/dev/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (ui < 0) {
+        logf_("decoy: open /dev/uinput: %s", strerror(errno));
+        return -1;
+    }
+    ioctl(ui, UI_SET_EVBIT, EV_KEY);
+    for (int k = BTN_SOUTH; k <= BTN_THUMBR; k++) ioctl(ui, UI_SET_KEYBIT, k);
+    ioctl(ui, UI_SET_EVBIT, EV_ABS);
+    static const int axes[] = {ABS_X, ABS_Y, ABS_Z, ABS_RZ};
+    for (size_t i = 0; i < sizeof(axes) / sizeof(axes[0]); i++) {
+        struct uinput_abs_setup as;
+        memset(&as, 0, sizeof(as));
+        as.code = axes[i];
+        as.absinfo.minimum = -32767;
+        as.absinfo.maximum = 32767;
+        ioctl(ui, UI_SET_ABSBIT, axes[i]);
+        ioctl(ui, UI_ABS_SETUP, &as);
+    }
+    struct uinput_setup us;
+    memset(&us, 0, sizeof(us));
+    us.id.bustype = BUS_VIRTUAL;
+    us.id.vendor = VIRTUAL_VENDOR;
+    us.id.product = VIRTUAL_PRODUCT + 1;
+    us.id.version = VIRTUAL_VERSION;
+    snprintf(us.name, UINPUT_MAX_NAME_SIZE, "%s", DECOY_NAME);
+    if (ioctl(ui, UI_DEV_SETUP, &us) < 0 || ioctl(ui, UI_DEV_CREATE) < 0) {
+        logf_("decoy: UI_DEV_SETUP/CREATE: %s", strerror(errno));
+        close(ui);
+        return -1;
+    }
+    logf_("created decoy device \"%s\"", DECOY_NAME);
+    return ui;
+}
+
 // ---- clients --------------------------------------------------------------
 
 struct client {
@@ -334,6 +380,7 @@ static void handle_line(struct client *c, char *line) {
             struct input_id id;
             if (ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name) >= 0 &&
                 ioctl(fd, EVIOCGID, &id) >= 0 && strcmp(name, g_virtual_name) != 0 &&
+                strcmp(name, DECOY_NAME) != 0 &&
                 looks_like_gamepad(fd)) {
                 char out[NAME_LEN + 64];
                 char idstr[32];
@@ -592,6 +639,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // Decoy first, and give RsMapping a moment to adopt it, before our real
+    // device exists. Failure is not fatal; we just lose the workaround.
+    g_decoy = create_decoy();
+    if (g_decoy >= 0) usleep(1500 * 1000);
+
     long last_attach_try = 0;
     while (!g_stop) {
         if (g_src < 0 && now_us() - last_attach_try >= RESCAN_INTERVAL_MS * 1000L) {
@@ -650,6 +702,10 @@ int main(int argc, char **argv) {
     if (g_ui >= 0) {
         ioctl(g_ui, UI_DEV_DESTROY);
         close(g_ui);
+    }
+    if (g_decoy >= 0) {
+        ioctl(g_decoy, UI_DEV_DESTROY);
+        close(g_decoy);
     }
     close(lfd);
     logf_("exiting");

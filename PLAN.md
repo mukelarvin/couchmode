@@ -49,6 +49,32 @@ just status + resume points, not the design doc.
 
 ## Session log
 
+### 2026-09-29 (g) — decoy device to keep RsMapping off our gamepad (Claude Code)
+
+Experiments (BT pad asleep, so no other external pad; throwaway uinput devices):
+- With no other external pad, RsMapping adopts ANY gamepad-like device (tried
+  bus virtual/USB/BT, various vendor IDs): creates the 2022:3001 v0064 copy
+  under the same name and hides the original's /dev/input node.
+- It is sticky: it keeps the device it adopted until that disappears, then hops
+  to the next one. Native symbols `isShouldhold` / `setNowHoldDevice` fit.
+- **Decoy works:** a silent gamepad-like device created first gets adopted, and a
+  second device created afterwards keeps its node and is seen directly by Android.
+  When the decoy was removed, the copy hopped onto the real device.
+- Daemon now creates "CouchMode Decoy (ignore)" (1209:c0df, never emits events)
+  before the real virtual gamepad and sleeps 1.5s so RsMapping adopts it;
+  hidden from LIST. Verified with the real daemon (BT pad asleep): copy on the
+  decoy, ours visible, `dumpsys input` lists both.
+- Side effects: apps list one extra gamepad named "CouchMode Decoy (ignore)"
+  (actually RsMapping's copy of it) that never does anything.
+- **Not yet verified:** with the decoy held, does a BT pad that connects LATER
+  stay un-copied (expected, since sticky) and remain usable as a source; what
+  happens on reboot ordering (if RsMapping already holds a real pad when the
+  daemon starts, it stays on that pad - fine, ours is still visible). Relies
+  on undocumented firmware behaviour of a Retroid Pocket Nova (firmware may
+  change it).
+- Next: verify with the BT pad reconnecting; then canonical layout + rumble,
+  multi-source priority; consider selecting the RAW BT node as a source.
+
 ### 2026-09-29 (f) — the Retroid service clones every gamepad, including ours (Claude Code)
 
 Luke unplugged the BT pad (no fallback - expected, single-source only), replugged
