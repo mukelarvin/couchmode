@@ -49,6 +49,32 @@ just status + resume points, not the design doc.
 
 ## Session log
 
+### 2026-09-29 (d) — app <-> daemon channel (Claude Code)
+
+- Channel: abstract unix socket `@couchmode`, line-based text protocol
+  (documented at the top of `daemon/gamepad_merger.c`): PING, STATUS, LIST,
+  SOURCE <name>, SNIFF <name> (streams raw key/abs events, works on the grabbed
+  source too), STOP. Works identically for a shell- or root-started daemon; no
+  files. The daemon refuses a second instance (socket name taken) and, with
+  `-u <uid>`, only accepts the app's uid plus root/shell (SO_PEERCRED).
+- Daemon rewritten around one poll loop (listener + source + clients).
+- App: `daemon/DaemonClient.kt`, `daemon/EvdevNames.kt`, temporary
+  `ui/DaemonScreen.kt` (status, gamepad device list, Watch raw events, Use as
+  source). Replaces the Shizuku status screen in `MainActivity`; Shizuku code
+  remains, on hold.
+- `tools/couchmode-start.sh`: starts the daemon from the installed app's lib
+  dir with the app's uid. Verified when run via `adb shell` as the shell user;
+  NOT yet tried through the root menu (`pm` under the root context is unknown).
+- Verified over adb with a throwaway C client: PING/STATUS/LIST work, LIST shows
+  "Nintendo Switch Pro Controller" (Luke's 8BitDo, Bluetooth, Switch mode,
+  reports 0003:2022:3001:0064 - same VID:PID as the Retroid's own pads, so
+  match by name). SNIFF returned OK; button events not yet seen.
+- Known limitation: the virtual device's capabilities/axis ranges are copied
+  from the FIRST source. Forwarding another controller (e.g. the 8BitDo) needs
+  per-controller normalization to the canonical layout (the wizard's job).
+- Next: try the app's Watch screen on the 8BitDo, run the start script through
+  the root menu, then multi-source priority + normalization.
+
 ### 2026-09-29 (c) — CI green, daemon wired into Gradle (Claude Code)
 
 - Generated the Gradle wrapper (9.7.1) and marked `gradlew` executable
