@@ -79,8 +79,10 @@ just status + resume points, not the design doc.
   games get no rumble on the BT pad through our virtual device. Needs: declare
   FF_RUMBLE on the virtual device, handle uinput UI_FF_UPLOAD/ERASE, and route
   effects to the *active* source's FF (BT pad or the haptics node), not the
-  handheld's motor. Also find out why the handheld vibrates now (probably the
-  vendor service mirroring rumble to its own motor).
+  handheld's motor. Resolved: the handheld buzzes because Dolphin's rumble motor is set to
+  `Android/0/Device Sensors:Motor 0` (the handheld's own vibrator), not because of
+  us. Dolphin lists motors per input device, so declaring FF_RUMBLE on the
+  virtual device should make a CouchMode motor selectable (expected, unverified).
 - Retroid-specific vs generic (Luke's question): matching, source switching,
   and event forwarding are generic. Still Retroid-shaped: default source name,
   virtual device capabilities copied from the first source (should become a
