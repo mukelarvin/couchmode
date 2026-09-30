@@ -49,6 +49,28 @@ just status + resume points, not the design doc.
 
 ## Session log
 
+### 2026-09-30 (h) - starting the daemon at boot: undecided (Claude Code)
+
+Luke rebooted as a test: the daemon does NOT start by itself (Phase 8 not built). Everything
+it saves survives (priority list, maps, decoy option, app prefs). The Retroid ignore list is kept
+in the Retroid app's own saved preferences and is name-based only (no Bluetooth/ID), so one
+"Nintendo Switch Pro Controller" entry covers every pad with that name; it should survive reboots
+(not yet proven; the app re-applies it on launch anyway).
+
+- Checked the firmware's init configuration: no standard user-script boot hook (no userinit,
+  init.d, service.d). The "Run script as Root" menu sends commands to a Retroid root service; the
+  settings app also has an "app auto launch" list (launches apps at boot, no root).
+- Two further steps (asking that root service from the app as an ordinary app, and reading its
+  binary) were blocked by the tool's safety check. NOT pursued or worked around. Luke decides.
+  Trade-off to tell him: if an ordinary app could call it, that would be a firmware security hole
+  that Retroid could close.
+- Options given to Luke: (1) one tap per boot via Run script as Root, made smoother in the app;
+  (2) ask Retroid for a supported run-at-startup option; (3) Luke explicitly approves a harmless
+  test of whether an app may call the service. Recommendation: 1 now, 2 in parallel.
+- Root start script: `tools/couchmode-start.sh`; pushed as `/sdcard/Download/couchmode-start-0930b.sh`
+  (first time it is used through the root menu; `pm` under the root context is still untested).
+- USB pads: Luke wants to test one. Identity may need `phys` (USB port) when `uniq` is empty.
+
 ### 2026-09-30 (g) - ignore the controllers in the list; D-pad setup (Claude Code)
 
 - **Retroid ignore list now covers the controllers in the list** (not only our virtual gamepad),
