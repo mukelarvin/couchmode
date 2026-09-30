@@ -58,7 +58,11 @@ through MediaStore under a NEW timestamped name every time, e.g. `couchmode-star
 which avoids the stale same-named copy problem without adb) and an "Open Settings" button (the
 Retroid's RunScriptActivity is not exported, so it can't be opened directly). The controller list
 placeholder says it appears once the service runs. Verified the file lands in Download (974 bytes,
-LF). NOT yet verified: that the root menu runs it, in particular `pm` under the root context.
+LF). **Verified by Luke running it through Settings -> Run script as Root after a reboot:** the daemon
+started as root (uid 0), `pm` works under the root context (it found the app's lib dir), it loaded the
+saved priority list, created the virtual gamepad and attached the onboard controls. The Retroid ignore
+list was still there after the reboot (Luke read it before the daemon ran, so the app had not
+re-applied it), i.e. it persists.
 Option 2 (unprivileged foreground service for external pads + root tap for the onboard pad) is
 parked; revisit if a forgotten tap after reboot proves annoying.
 
