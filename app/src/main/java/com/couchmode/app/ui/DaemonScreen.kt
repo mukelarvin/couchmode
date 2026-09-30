@@ -17,6 +17,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Modifier
@@ -26,6 +27,7 @@ import com.couchmode.app.daemon.DaemonStatus
 import com.couchmode.app.daemon.EvdevNames
 import com.couchmode.app.daemon.PadDevice
 import com.couchmode.app.daemon.PriorityEntry
+import com.couchmode.app.retroid.RetroidMapping
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -50,6 +52,9 @@ fun DaemonScreen(modifier: Modifier = Modifier) {
     var watching by remember { mutableStateOf<PadDevice?>(null) }
     var watchError by remember { mutableStateOf<String?>(null) }
     val values: SnapshotStateMap<String, Int> = remember { mutableStateMapOf() }
+    val context = LocalContext.current
+    var retroidIgnored by remember { mutableStateOf<List<String>?>(null) }
+    var retroidNote by remember { mutableStateOf("Not checked") }
 
     // Polls the daemon every couple of seconds so connection state stays current;
     // changing `refresh` restarts the loop for an immediate update.
@@ -110,6 +115,33 @@ fun DaemonScreen(modifier: Modifier = Modifier) {
             }
         )
         Button(onClick = { refresh++ }) { Text("Refresh") }
+
+        Text("Retroid input service")
+        Text(if (RetroidMapping.isInstalled(context)) "Installed (${RetroidMapping.PACKAGE})" else "Not installed")
+        Text(retroidNote)
+        retroidIgnored?.let { Text("Ignored devices: " + (it.ifEmpty { listOf("(none)") }.joinToString(", "))) }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = {
+                scope.launch {
+                    retroidIgnored = RetroidMapping.ignoredDevices(context)
+                    retroidNote = if (retroidIgnored == null) "Could not reach the service" else "Read OK"
+                }
+            }) { Text("Read list") }
+            OutlinedButton(onClick = {
+                scope.launch {
+                    val ok = RetroidMapping.setIgnored(context, "CouchMode Virtual Gamepad", true)
+                    retroidIgnored = RetroidMapping.ignoredDevices(context)
+                    retroidNote = if (ok) "Added CouchMode Virtual Gamepad" else "Add failed"
+                }
+            }) { Text("Ignore ours") }
+            OutlinedButton(onClick = {
+                scope.launch {
+                    val ok = RetroidMapping.setIgnored(context, "CouchMode Virtual Gamepad", false)
+                    retroidIgnored = RetroidMapping.ignoredDevices(context)
+                    retroidNote = if (ok) "Removed CouchMode Virtual Gamepad" else "Remove failed"
+                }
+            }) { Text("Stop ignoring") }
+        }
 
         Text("Priority (top = used first)")
         if (priority.isEmpty()) Text("Empty. Add a controller below.")

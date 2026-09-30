@@ -31,6 +31,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -56,6 +57,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.couchmode.app.daemon.PriorityEntry
+import com.couchmode.app.retroid.CompatMode
 import kotlinx.coroutines.launch
 
 private val ConnectedGreen = Color(0xFF2E9E44)
@@ -71,6 +73,7 @@ fun ControllerListScreen(
     onRemove: (PriorityEntry) -> Unit,
     onAddController: () -> Unit,
     onOpenDeveloperTools: () -> Unit,
+    onSetRetroidCompat: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
@@ -117,6 +120,49 @@ fun ControllerListScreen(
                     Text("  Add controller")
                 }
             }
+            if (state.compat.mode != null && state.compat.mode != CompatMode.NOT_APPLICABLE) {
+                RetroidCompatCard(state.compat, onSetRetroidCompat)
+            }
+        }
+    }
+}
+
+/** Explains and controls the workaround for the Retroid input service copying CouchMode's gamepad. */
+@Composable
+private fun RetroidCompatCard(compat: CompatState, onSet: (Boolean) -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Retroid compatibility",
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.weight(1f),
+                )
+                Switch(checked = compat.enabled, onCheckedChange = onSet, enabled = !compat.busy)
+            }
+            Text(
+                "Retroid's input service copies and hides the controllers it finds, which can rename " +
+                    "CouchMode's virtual controller or change its number in emulators. With this on, " +
+                    "CouchMode keeps that service away from its own controller.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                when {
+                    compat.busy -> "Applying…"
+                    compat.mode == CompatMode.IGNORE_LIST ->
+                        "Active: Retroid's input service has been told to ignore CouchMode's virtual controller."
+                    compat.mode == CompatMode.DECOY ->
+                        "Active (fallback): Retroid's settings couldn't be changed, so CouchMode adds a silent " +
+                            "\"CouchMode Decoy (ignore)\" controller instead. You may see it listed in emulators; " +
+                            "ignore it."
+                    compat.mode == CompatMode.OFF ->
+                        "Off. Controllers may be renumbered when others connect. Turn this off on devices that " +
+                            "aren't Retroids."
+                    else -> ""
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

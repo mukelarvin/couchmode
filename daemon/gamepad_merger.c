@@ -11,7 +11,7 @@
 // line-based text protocol, one request per line:
 //
 //   PING                  -> PONG
-//   STATUS                -> S<TAB>activeOrTopName<TAB>attached(0/1)<TAB>virtual<TAB>id
+//   STATUS                -> S<TAB>activeOrTopName<TAB>attached(0/1)<TAB>virtual<TAB>id<TAB>decoy(0/1)
 //   LIST                  -> D<TAB>name<TAB>bus:vendor:product:version<TAB>isSource(0/1)
 //                            ... then END       (gamepad-looking devices only)
 //   PRIORITY[<TAB>name<TAB>id]... -> OK   replace the priority list (up to 8 name/id
@@ -27,6 +27,10 @@
 //                            grabbed device can't be opened twice, so we tap
 //                            our own forwarding for it).
 //   STOP                  -> OK     stop sniffing
+//   DECOY 0|1             -> OK     destroy/create the decoy gamepad (see create_decoy); saved
+//   RECREATE              -> OK     destroy and re-create the virtual gamepad (new device, same
+//                            source). Needed after the Retroid service's ignore list changes,
+//                            because it only consults that list when a device appears.
 //
 // Usage: gamepad_merger [-t] [-u app_uid] [-s "source name"] [-n "virtual name"]
 //   -t  log the latency we add every 10s
@@ -93,6 +97,7 @@ static const char *g_virtual_name = DEFAULT_VIRTUAL_NAME;
 static int g_src = -1;             // grabbed source device, or -1 if not present
 static int g_ui = -1;              // uinput fd; created once, kept for the process lifetime
 static int g_decoy = -1;           // decoy gamepad, see create_decoy()
+static int g_use_decoy = 1;        // saved option: create the decoy at startup
 static int g_dropping = 0;         // discarding events until the next SYN_REPORT after SYN_DROPPED
 static int g_synth_triggers = 0;   // source has BTN_TL2/TR2 buttons: synthesize ABS_BRAKE/ABS_GAS from them...
 static int g_analog_seen[2];       // ...until the source actually sends that analog axis (0 = BRAKE, 1 = GAS)
@@ -371,6 +376,17 @@ static int create_decoy(void) {
     return ui;
 }
 
+static void set_decoy(int on) {
+    if (on && g_decoy < 0) {
+        g_decoy = create_decoy();
+    } else if (!on && g_decoy >= 0) {
+        ioctl(g_decoy, UI_DEV_DESTROY);
+        close(g_decoy);
+        g_decoy = -1;
+        logf_("removed decoy device");
+    }
+}
+
 // ---- priority list --------------------------------------------------------
 
 static void save_config(void) {
@@ -379,6 +395,7 @@ static void save_config(void) {
         logf_("cannot write %s: %s", CONFIG_PATH, strerror(errno));
         return;
     }
+    fprintf(f, "@decoy\t%d\n", g_use_decoy);
     for (int i = 0; i < g_nprio; i++) fprintf(f, "%s\t%s\n", g_prio[i].name, g_prio[i].id);
     fchmod(fileno(f), 0666);  // the daemon may run as root or shell across restarts
     fclose(f);
@@ -392,6 +409,10 @@ static int load_config(void) {
     g_nprio = 0;
     while (g_nprio < MAX_PRIO && fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\r\n")] = 0;
+        if (strncmp(line, "@decoy\t", 7) == 0) {  // saved option, not a priority entry
+            g_use_decoy = line[7] != '0';
+            continue;
+        }
         char *tab = strchr(line, '\t');
         char *id = "";
         if (tab) {
@@ -458,6 +479,7 @@ static int is_source(const char *name, const char *id) {
 
 static void detach_source(void);
 static int check_priority(void);
+static void recreate_virtual(void);
 
 // Replaces the priority list with the given (name, id) pairs, saves it, and re-evaluates.
 static void set_priority(char **f, int n) {
@@ -488,7 +510,8 @@ static void handle_line(struct client *c, char *line) {
         char out[NAME_LEN * 2 + 32];
         const char *name = g_src >= 0 ? g_active_name : (g_nprio > 0 ? g_prio[0].name : "");
         const char *id = g_src >= 0 ? g_active_id : (g_nprio > 0 ? g_prio[0].id : "");
-        snprintf(out, sizeof(out), "S\t%s\t%d\t%s\t%s\n", name, g_src >= 0, g_virtual_name, id);
+        snprintf(out, sizeof(out), "S\t%s\t%d\t%s\t%s\t%d\n", name, g_src >= 0, g_virtual_name, id,
+                 g_decoy >= 0);
         send_str(c->fd, out);
     } else if (strcmp(line, "LIST") == 0) {
         DIR *d = opendir("/dev/input");
@@ -559,6 +582,14 @@ static void handle_line(struct client *c, char *line) {
         } else {
             send_str(c->fd, "ERR notfound\n");
         }
+    } else if (strncmp(line, "DECOY ", 6) == 0 && (line[6] == '0' || line[6] == '1') && line[7] == 0) {
+        g_use_decoy = line[6] == '1';
+        set_decoy(g_use_decoy);
+        save_config();
+        send_str(c->fd, "OK\n");
+    } else if (strcmp(line, "RECREATE") == 0) {
+        recreate_virtual();
+        send_str(c->fd, "OK\n");
     } else if (strcmp(line, "STOP") == 0) {
         stop_sniff(c);
         send_str(c->fd, "OK\n");
@@ -743,6 +774,20 @@ static int check_priority(void) {
     return 0;
 }
 
+// Destroys and re-creates the virtual gamepad, re-attaching the current source. The
+// Retroid service checks its ignore list only when a device appears, so this is how
+// a newly added ignore entry takes effect on a device it already holds.
+static void recreate_virtual(void) {
+    if (g_ui < 0) return;
+    detach_source();
+    ioctl(g_ui, UI_DEV_DESTROY);
+    close(g_ui);
+    g_ui = -1;
+    logf_("recreating virtual device");
+    usleep(400 * 1000);  // let other services see it go before it reappears
+    check_priority();
+}
+
 // Reads a batch from the source and forwards it. Returns -1 on a fatal
 // virtual-device write error; a vanished source just detaches.
 static int pump_source(void) {
@@ -865,9 +910,9 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Decoy first, and give RsMapping a moment to adopt it, before our real
-    // device exists. Failure is not fatal; we just lose the workaround.
-    g_decoy = create_decoy();
+    // Decoy first (unless turned off), and give RsMapping a moment to adopt it, before our
+    // real device exists. Failure is not fatal; we just lose the workaround.
+    if (g_use_decoy) g_decoy = create_decoy();
     if (g_decoy >= 0) usleep(1500 * 1000);
 
     long last_check = 0;

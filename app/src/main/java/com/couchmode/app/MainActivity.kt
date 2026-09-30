@@ -53,6 +53,7 @@ class MainActivity : ComponentActivity() {
                             onRemove = viewModel::removeFromPriority,
                             onAddController = { screen = Screen.AddController },
                             onOpenDeveloperTools = { screen = Screen.DeveloperTools },
+                            onSetRetroidCompat = viewModel::setRetroidCompatEnabled,
                         )
                         Screen.AddController -> AddControllerScreen(
                             state = state,

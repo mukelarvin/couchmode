@@ -19,6 +19,7 @@ data class DaemonStatus(
     val sourceConnected: Boolean,
     val virtualName: String,
     val sourceId: String,
+    val decoyActive: Boolean,
 )
 
 /** One row of the daemon's priority list, highest priority first. */
@@ -76,6 +77,7 @@ object DaemonClient {
             sourceConnected = f[2] == "1",
             virtualName = f[3],
             sourceId = f.getOrElse(4) { "" },
+            decoyActive = f.getOrElse(5) { "0" } == "1",
         )
     }
 
@@ -96,6 +98,16 @@ object DaemonClient {
     suspend fun setPriority(entries: List<PriorityEntry>) {
         val command = "PRIORITY" + entries.joinToString("") { "\t${it.name}\t${it.id}" }
         check(request(command).firstOrNull() == "OK") { "daemon rejected PRIORITY" }
+    }
+
+    /** Turns the decoy gamepad (see daemon/gamepad_merger.c, create_decoy) on or off; the daemon remembers it. */
+    suspend fun setDecoy(on: Boolean) {
+        check(request("DECOY ${if (on) 1 else 0}").firstOrNull() == "OK") { "daemon rejected DECOY" }
+    }
+
+    /** Makes the daemon destroy and re-create its virtual gamepad (a one-time renumbering for apps). */
+    suspend fun recreateVirtual() {
+        check(request("RECREATE").firstOrNull() == "OK") { "daemon rejected RECREATE" }
     }
 
     suspend fun setSource(device: PadDevice) {

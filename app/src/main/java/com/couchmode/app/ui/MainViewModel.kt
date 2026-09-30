@@ -1,10 +1,13 @@
 package com.couchmode.app.ui
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.couchmode.app.daemon.DaemonClient
 import com.couchmode.app.daemon.PadDevice
 import com.couchmode.app.daemon.PriorityEntry
+import com.couchmode.app.retroid.CompatMode
+import com.couchmode.app.retroid.RetroidCompat
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -17,18 +20,28 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
+/** The Retroid-compatibility setting and what it resulted in; [mode] is null until first applied. */
+data class CompatState(
+    val enabled: Boolean = true,
+    val mode: CompatMode? = null,
+    val busy: Boolean = false,
+)
+
 data class ControllersState(
     /** null until the first check completes. */
     val daemonRunning: Boolean? = null,
     val priority: List<PriorityEntry> = emptyList(),
     /** Gamepad-like devices present right now (includes ones already in [priority]). */
     val devices: List<PadDevice> = emptyList(),
+    val compat: CompatState = CompatState(),
 )
 
 private const val POLL_MS = 2000L
 
-class MainViewModel : ViewModel() {
+class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val refreshNow = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    private val prefs = application.getSharedPreferences("couchmode", android.content.Context.MODE_PRIVATE)
+    private val compat = MutableStateFlow(CompatState(enabled = prefs.getBoolean(KEY_RETROID_COMPAT, true)))
 
     // A reorder shown immediately, until the daemon's own list catches up.
     private val optimisticPriority = MutableStateFlow<List<PriorityEntry>?>(null)
@@ -46,9 +59,33 @@ class MainViewModel : ViewModel() {
         initialValue = ControllersState(),
     )
 
-    val state: StateFlow<ControllersState> = combine(polled, optimisticPriority) { polled, optimistic ->
-        if (optimistic != null) polled.copy(priority = optimistic) else polled
+    val state: StateFlow<ControllersState> = combine(polled, optimisticPriority, compat) { polled, optimistic, compat ->
+        polled.copy(priority = optimistic ?: polled.priority, compat = compat)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ControllersState())
+
+    init {
+        // Once the daemon is reachable, bring it and the Retroid service into the wanted state.
+        viewModelScope.launch {
+            state.first { it.daemonRunning == true }
+            applyRetroidCompat()
+        }
+    }
+
+    private fun applyRetroidCompat() {
+        viewModelScope.launch {
+            val enabled = compat.value.enabled
+            compat.value = compat.value.copy(busy = true)
+            val mode = RetroidCompat.apply(getApplication(), enabled)
+            compat.value = CompatState(enabled = enabled, mode = mode, busy = false)
+            refreshNow.tryEmit(Unit)
+        }
+    }
+
+    fun setRetroidCompatEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_RETROID_COMPAT, enabled).apply()
+        compat.value = compat.value.copy(enabled = enabled)
+        applyRetroidCompat()
+    }
 
     private suspend fun load(): ControllersState {
         if (!DaemonClient.isRunning()) return ControllersState(daemonRunning = false)
@@ -90,6 +127,7 @@ class MainViewModel : ViewModel() {
 
     companion object {
         const val MAX_PRIORITY = 8
+        private const val KEY_RETROID_COMPAT = "retroid_compat"
     }
 }
 

@@ -49,6 +49,39 @@ just status + resume points, not the design doc.
 
 ## Session log
 
+### 2026-09-30 (c) — Retroid ignore list replaces the decoy (Claude Code)
+
+Luke wanted a smooth experience whether the controller or the daemon starts first,
+and asked about disconnecting external pads at startup (not needed, and Bluetooth
+off also drops audio; USB/dongles can't be disconnected anyway).
+
+- **Verified on device (BT off for the test, then back on):** the app can bind the
+  Retroid service (`com.rp.mapping`, needs `<queries>`), read its ignore list
+  (tx 37) and edit it (tx 38). With our name "CouchMode Virtual Gamepad" on the list,
+  a stand-in device of that name is NOT adopted: no copy, node stays visible.
+  Without the entry it is copied and hidden (baseline reproduced in the same run).
+  Adding the name while the device is already held does NOT release it; the device
+  must be re-created.
+- **Built:** daemon commands `DECOY 0|1` (create/destroy at runtime; saved as
+  `@decoy<TAB>0|1` in the priority file; STATUS has a 6th field) and `RECREATE`
+  (destroy + recreate the virtual device, re-attach the source). App:
+  `retroid/RetroidMapping.kt` (binder client), `retroid/RetroidCompat.kt` (modes
+  NOT_APPLICABLE / IGNORE_LIST / DECOY / OFF), applied once the daemon is reachable:
+  Retroid service present -> ensure our name is ignored (recreate the virtual device
+  only if we just added it) -> decoy off; if the list can't be read/edited -> decoy on
+  as a fallback. A "Retroid compatibility" card with a switch and a plain-language
+  status sits on the home screen (hidden on non-Retroid devices). Turning it off
+  removes our entry and the decoy.
+- **Verified end to end:** fresh daemon (decoy on) + name not on the list -> opening
+  the app added the name, recreated the device and removed the decoy; saved as off;
+  then the 8BitDo woke: the Retroid service held it (copy only), our device stayed
+  visible, the picker listed the pad (via the copy), and it became the active source.
+- Not verified: behaviour after a Retroid firmware update, a reboot with the root
+  menu launch, and Dolphin binding stability across pad connect/disconnect (needs a
+  human with the pad). Risks: the binder interface is reverse-engineered and
+  obfuscated (classes `n0.a`), so it can change; fallback is the decoy.
+- Dev tools still has Read list / Ignore ours / Stop ignoring buttons.
+
 ### 2026-09-30 (b) — RsMapping has a device blacklist we can probably use instead of the decoy
 
 Read from the APK's dex (dexdump), not yet exercised on the device:
