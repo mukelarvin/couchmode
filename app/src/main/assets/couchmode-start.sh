@@ -1,9 +1,11 @@
 #!/bin/sh
 
 # Starts the CouchMode daemon from the installed app's native lib dir.
-# Run via Settings -> "Run script as Root" (or from `adb shell`).
-# Push under a brand-new filename each time (see CLAUDE.md, root-menu overlay gotcha):
-#   adb push tools/couchmode-start.sh /sdcard/Download/couchmode-start-N.sh
+# Run via Settings -> "Run script as Root" (or from `adb shell`). Once per boot.
+# The app saves this file to Download under a brand-new name each time it is asked to (the root
+# menu can run a stale same-named copy otherwise, see CLAUDE.md). The canonical copy lives in the
+# app's assets (app/src/main/assets/couchmode-start.sh); for adb use:
+#   adb push app/src/main/assets/couchmode-start.sh /sdcard/Download/couchmode-start-N.sh
 #
 # The daemon only accepts app connections from the app's uid (plus root/shell).
 # Log: /data/local/tmp/couchmode-daemon.log

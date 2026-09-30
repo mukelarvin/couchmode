@@ -49,6 +49,19 @@ just status + resume points, not the design doc.
 
 ## Session log
 
+### 2026-09-30 (i) - boot start: option 1 (one root tap per boot), made smoother (Claude Code)
+
+Luke chose option 1 for now. Root-menu start stays (once per boot). The start script is now an app
+asset (`app/src/main/assets/couchmode-start.sh`, moved from tools/). When the daemon isn't running the
+home screen shows numbered steps, a "Save start script" button (writes the script to Download
+through MediaStore under a NEW timestamped name every time, e.g. `couchmode-start-20260930-174443.sh`,
+which avoids the stale same-named copy problem without adb) and an "Open Settings" button (the
+Retroid's RunScriptActivity is not exported, so it can't be opened directly). The controller list
+placeholder says it appears once the service runs. Verified the file lands in Download (974 bytes,
+LF). NOT yet verified: that the root menu runs it, in particular `pm` under the root context.
+Option 2 (unprivileged foreground service for external pads + root tap for the onboard pad) is
+parked; revisit if a forgotten tap after reboot proves annoying.
+
 ### 2026-09-30 (h) - starting the daemon at boot: undecided (Claude Code)
 
 Luke rebooted as a test: the daemon does NOT start by itself (Phase 8 not built). Everything
@@ -80,7 +93,7 @@ in the Retroid app's own saved preferences and is name-based only (no Bluetooth/
   for external pads + root tap to add the onboard pad ("two tiers"); ask Retroid; Shizuku-style
   wireless-debugging start.
 
-- Root start script: `tools/couchmode-start.sh`; pushed as `/sdcard/Download/couchmode-start-0930b.sh`
+- Root start script: `app/src/main/assets/couchmode-start.sh`; pushed as `/sdcard/Download/couchmode-start-0930b.sh`
   (first time it is used through the root menu; `pm` under the root context is still untested).
 - USB pads: Luke wants to test one. Identity may need `phys` (USB port) when `uniq` is empty.
 
@@ -494,7 +507,7 @@ re-mapping Dolphin the A/B and X/Y pairs were swapped. Investigation:
   `ui/DaemonScreen.kt` (status, gamepad device list, Watch raw events, Use as
   source). Replaces the Shizuku status screen in `MainActivity`; Shizuku code
   remains, on hold.
-- `tools/couchmode-start.sh`: starts the daemon from the installed app's lib
+- `app/src/main/assets/couchmode-start.sh`: starts the daemon from the installed app's lib
   dir with the app's uid. Verified when run via `adb shell` as the shell user;
   NOT yet tried through the root menu (`pm` under the root context is unknown).
 - Verified over adb with a throwaway C client: PING/STATUS/LIST work, LIST shows

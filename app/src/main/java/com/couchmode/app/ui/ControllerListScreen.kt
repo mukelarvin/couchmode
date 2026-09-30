@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
@@ -56,12 +57,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import android.content.Intent
+import android.provider.Settings
 import com.couchmode.app.daemon.PriorityEntry
+import com.couchmode.app.daemon.StartScript
 import com.couchmode.app.retroid.CompatMode
 import kotlinx.coroutines.launch
 
@@ -125,7 +130,13 @@ fun ControllerListScreen(
         ) {
             if (state.daemonRunning == false) DaemonNotRunningCard()
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                PriorityList(
+                if (state.daemonRunning == false) {
+                    Text(
+                        "Your controller list shows up here once the service is running.",
+                        modifier = Modifier.padding(16.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                } else PriorityList(
                     entries = state.priority,
                     userNames = state.userNames,
                     onReorder = onReorder,
@@ -215,15 +226,40 @@ private fun RenameDialog(current: String, defaultName: String, onDismiss: () -> 
     )
 }
 
+/** Shown when the daemon isn't running: it has to be started once after every restart, through the Retroid's root-script screen. */
 @Composable
 private fun DaemonNotRunningCard() {
+    val context = LocalContext.current
+    var savedAs by remember { mutableStateOf<String?>(null) }
+    var failed by remember { mutableStateOf(false) }
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("CouchMode service isn't running", style = MaterialTheme.typography.titleSmall)
             Text(
-                "Start it with Settings → Run script as Root and pick couchmode-start.sh (see tools/).",
+                "It has to be started once after every restart of the handheld. Until then your controllers " +
+                    "work as usual, but CouchMode's combined controller isn't available.",
                 style = MaterialTheme.typography.bodySmall,
             )
+            Text(
+                "1. Tap \"Save start script\" below.\n" +
+                    "2. Open Settings, then \"Run script as Root\".\n" +
+                    "3. Pick the file it names, in the Download folder, and confirm.\n" +
+                    "4. Come back here. This message goes away by itself.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    savedAs = StartScript.saveToDownloads(context)
+                    failed = savedAs == null
+                }) { Text("Save start script") }
+                OutlinedButton(onClick = {
+                    context.startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }) { Text("Open Settings") }
+            }
+            savedAs?.let {
+                Text("Saved to Download as $it. Pick exactly this file (a new name is used every time).", style = MaterialTheme.typography.bodySmall)
+            }
+            if (failed) Text("Couldn't save the file. Check storage, then try again.", style = MaterialTheme.typography.bodySmall)
         }
     }
 }
