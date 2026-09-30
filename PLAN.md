@@ -49,6 +49,26 @@ just status + resume points, not the design doc.
 
 ## Session log
 
+### 2026-09-30 (j) - first USB controller test (Claude Code, over wireless debugging)
+
+Plugging a USB pad into the handheld's USB-C port drops the adb-over-USB connection (same port), so
+Luke paired wireless debugging (`adb pair` using the address from `adb mdns services`; connect with
+`-s 192.168.2.196:32859`; he should turn it off when done).
+
+- Pad tested: Sony DualShock 4 (054c:05c4), name "Sony Computer Entertainment Wireless Controller"
+  over USB (bus 0003, phys `usb-xhci-hcd.2.auto-1.4/input0`). It has a UNIQUE string
+  (`a4:15:66:88:5c:59`, the pad's own address, present even over USB), so name+id+uniq identification
+  works for USB pads; two identical USB pads would be distinguishable. The Retroid service was holding
+  it (copy only) because it was plugged in before its name was on the ignore list; a replug fixed it.
+- Wizard on the real device: 11 of 13 buttons captured with correct DS4 layout (hid-sony reports
+  square/triangle as BTN_WEST/BTN_NORTH = 308/307, correctly mapped to the Android X/Y placement).
+  D-pad and left bumper not captured; Luke says the left bumper is broken and the same buttons failed
+  over Bluetooth, so the pad is probably damaged. Not proven; needs a second controller. Raw-event
+  captures during presses were empty (timing), so the d-pad's actual output was never seen.
+- Finding: the same DS4 over Bluetooth is "Wireless Controller", bus 0005, id 054c:05c4:8100, same
+  uniq. Entries match on name+id+uniq, so USB and BT are two entries with separate setups. Possible
+  improvement: let an entry match on uniq alone when present.
+
 ### 2026-09-30 (i) - boot start: option 1 (one root tap per boot), made smoother (Claude Code)
 
 Luke chose option 1 for now. Root-menu start stays (once per boot). The start script is now an app
