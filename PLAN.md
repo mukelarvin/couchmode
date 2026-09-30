@@ -49,7 +49,33 @@ just status + resume points, not the design doc.
 
 ## Session log
 
-### 2026-09-30 (c) — Retroid ignore list replaces the decoy (Claude Code)
+### 2026-09-30 (d) â€” two identical pads (Claude Code)
+
+Luke connected two "Nintendo Switch Pro Controller"s and could only add one: the
+first was saved as name-only, which matched both, and the Retroid service holds only
+one pad (the other stays a raw node), so the held pad had only a uniq-less copy.
+
+- Identity is now name + `bus:vendor:product:version` + **uniq** (the Bluetooth
+  address for BT pads). Protocol: LIST `D name id isSource uniq`; GETPRIO `P name id
+  uniq connected active`; PRIORITY / SOURCE / SNIFF take name, id, uniq; STATUS has a
+  7th field (uniq). Config lines are `name<TAB>id<TAB>uniq` (old two-field lines still
+  load: uniq empty = match any).
+- The daemon reads `/proc/bus/input/devices`, which still lists a pad whose
+  /dev/input node the Retroid service hid, including its uniq. A held pad is listed
+  (and stored) under its own id/uniq; to forward it the daemon attaches the vendor's
+  copy, but only if the wanted uniq really is the held pad (`find_held_raw`).
+- Verified on the two real pads (71:73 raw node, 92:0B held): each selectable alone
+  by uniq, both in one list honoured the order, saved correctly. In the app both
+  are addable and rows show the last two bytes of the address. Button-level
+  behaviour of the two pads was not exercised (needs presses).
+- Also fixed: two Kotlin files had non-UTF-8 bytes from a Windows-default-encoding
+  edit ("Â·" and "â€¦" are now `Â·` / `â€¦` escapes), and PLAN.md had 8 stray
+  cp1252 bytes (em dashes) that showed as garbage on GitHub. When scripting edits on
+  this machine always pass `encoding='utf-8'` to `open()` (Python's default here is cp1252).
+- Caveat: entries saved before this (name only) still match any pad of that name.
+  Friendly per-pad names (rename) are not built; rows show the address tail.
+
+### 2026-09-30 (c) â€” Retroid ignore list replaces the decoy (Claude Code)
 
 Luke wanted a smooth experience whether the controller or the daemon starts first,
 and asked about disconnecting external pads at startup (not needed, and Bluetooth
@@ -82,7 +108,7 @@ off also drops audio; USB/dongles can't be disconnected anyway).
   obfuscated (classes `n0.a`), so it can change; fallback is the decoy.
 - Dev tools still has Read list / Ignore ours / Stop ignoring buttons.
 
-### 2026-09-30 (b) — RsMapping has a device blacklist we can probably use instead of the decoy
+### 2026-09-30 (b) â€” RsMapping has a device blacklist we can probably use instead of the decoy
 
 Read from the APK's dex (dexdump), not yet exercised on the device:
 - `AppMapping.isShouldHold(name)` = NOT `RsDeviceManage.isInBlackList(name)`: the
@@ -104,7 +130,7 @@ Read from the APK's dex (dexdump), not yet exercised on the device:
 - Also: `ApiService` methods include config/trigger/mode getters and setters we
   have not read; the same service may let us read trigger mode etc.
 
-### 2026-09-30 — multi-source priority (Claude Code)
+### 2026-09-30 â€” multi-source priority (Claude Code)
 
 - Daemon: priority list (up to 8 name + `bus:vendor:product:version` entries).
   Forwards from the highest-ranked connected one; while a lower entry is active
@@ -169,7 +195,7 @@ Read from the APK's dex (dexdump), not yet exercised on the device:
 - Not done yet: canonical virtual layout + rumble, first-run flow, wizard,
   the face-button swap investigation (parked by Luke), root-menu launch test.
 
-### 2026-09-29 (g) — decoy device to keep RsMapping off our gamepad (Claude Code)
+### 2026-09-29 (g) â€” decoy device to keep RsMapping off our gamepad (Claude Code)
 
 Experiments (BT pad asleep, so no other external pad; throwaway uinput devices):
 - With no other external pad, RsMapping adopts ANY gamepad-like device (tried
@@ -195,7 +221,7 @@ Experiments (BT pad asleep, so no other external pad; throwaway uinput devices):
 - Next: verify with the BT pad reconnecting; then canonical layout + rumble,
   multi-source priority; consider selecting the RAW BT node as a source.
 
-### 2026-09-29 (f) — the Retroid service clones every gamepad, including ours (Claude Code)
+### 2026-09-29 (f) â€” the Retroid service clones every gamepad, including ours (Claude Code)
 
 Luke unplugged the BT pad (no fallback - expected, single-source only), replugged
 it, Dolphin's "Android/N/CouchMode..." number changed 2 -> 3, and after
@@ -280,7 +306,7 @@ re-mapping Dolphin the A/B and X/Y pairs were swapped. Investigation:
     still need to learn when it adopts our device (seems to be only when no
     other external pad is connected).
 
-### 2026-09-29 (e) — digital-trigger synthesis + ambiguous device names (Claude Code)
+### 2026-09-29 (e) â€” digital-trigger synthesis + ambiguous device names (Claude Code)
 
 - Luke's 8BitDo (Bluetooth, Switch mode) forwarded as source works in Dolphin
   except the shoulder triggers. Cause: it sends only digital BTN_TL2/TR2, while
@@ -319,7 +345,7 @@ re-mapping Dolphin the A/B and X/Y pairs were swapped. Investigation:
   virtual device capabilities copied from the first source (should become a
   fixed canonical layout), and reliance on the vendor's virtual pad copy.
 
-### 2026-09-29 (d) — app <-> daemon channel (Claude Code)
+### 2026-09-29 (d) â€” app <-> daemon channel (Claude Code)
 
 - Channel: abstract unix socket `@couchmode`, line-based text protocol
   (documented at the top of `daemon/gamepad_merger.c`): PING, STATUS, LIST,
@@ -345,7 +371,7 @@ re-mapping Dolphin the A/B and X/Y pairs were swapped. Investigation:
 - Next: try the app's Watch screen on the 8BitDo, run the start script through
   the root menu, then multi-source priority + normalization.
 
-### 2026-09-29 (c) — CI green, daemon wired into Gradle (Claude Code)
+### 2026-09-29 (c) â€” CI green, daemon wired into Gradle (Claude Code)
 
 - Generated the Gradle wrapper (9.7.1) and marked `gradlew` executable
   (`git update-index --chmod=+x`; Windows doesn't record it, CI failed with
