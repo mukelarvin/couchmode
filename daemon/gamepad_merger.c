@@ -162,15 +162,25 @@ static void format_id(const struct input_id *id, char *out, size_t n) {
     snprintf(out, n, "%04x:%04x:%04x:%04x", id->bustype, id->vendor, id->product, id->version);
 }
 
+// The Retroid's RsMapping service publishes a re-mapped copy of an external pad
+// (2022:3001, non-zero version) and hides the original's /dev/input node while it
+// "holds" that pad. Only the onboard controls use version 0000.
+static int is_vendor_copy_id(const char *id) {
+    return strncmp(id, "0003:2022:3001:", 15) == 0 && strcmp(id + 15, "0000") != 0;
+}
+
 // Opens the first /dev/input/event* whose EVIOCGNAME equals `name` (and, if
-// `id` is non-empty, whose bus:vendor:product:version matches). Returns fd or -1.
+// `id` is non-empty, whose bus:vendor:product:version matches). If the wanted
+// device isn't there but the vendor's copy of a pad with that name is, returns the
+// copy instead, so a pad keeps working whether or not the service is holding it.
+// With an empty `id`, the real device is preferred over its copy. Returns fd or -1.
 static int open_by_name(const char *name, const char *id) {
     DIR *d = opendir("/dev/input");
     if (!d) {
         logf_("opendir /dev/input: %s", strerror(errno));
         return -1;
     }
-    int found = -1;
+    int found = -1, copy = -1;
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
         if (strncmp(e->d_name, "event", 5) != 0) continue;
@@ -182,14 +192,25 @@ static int open_by_name(const char *name, const char *id) {
         struct input_id iid;
         char idstr[32] = "";
         if (ioctl(fd, EVIOCGID, &iid) == 0) format_id(&iid, idstr, sizeof(idstr));
-        if (ioctl(fd, EVIOCGNAME(sizeof(devname) - 1), devname) >= 0 && strcmp(devname, name) == 0 &&
-            (id[0] == 0 || strcmp(id, idstr) == 0)) {
-            found = fd;
-            break;
+        if (ioctl(fd, EVIOCGNAME(sizeof(devname) - 1), devname) >= 0 && strcmp(devname, name) == 0) {
+            int exact = id[0] == 0 ? !is_vendor_copy_id(idstr) : strcmp(id, idstr) == 0;
+            if (exact) {
+                found = fd;
+                break;
+            }
+            if (copy < 0 && is_vendor_copy_id(idstr) && !is_vendor_copy_id(id)) {
+                copy = fd;  // remember as a fallback; keep looking for the real one
+                continue;
+            }
         }
         close(fd);
     }
     closedir(d);
+    if (found < 0) {
+        found = copy;
+        copy = -1;
+    }
+    if (copy >= 0) close(copy);
     return found;
 }
 

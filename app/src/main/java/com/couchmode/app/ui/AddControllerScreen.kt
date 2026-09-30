@@ -44,8 +44,11 @@ fun AddControllerScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // The Retroid service's re-mapped copies of external pads are hidden; see isVendorCopy().
-    val present = state.devices.filterNot { isVendorCopy(it.id) }
+    // The Retroid service's re-mapped copies of external pads are hidden, unless the
+    // real pad itself isn't available (the service is holding it); see isVendorCopy().
+    val present = state.devices.filter { device ->
+        !isVendorCopy(device.id) || state.devices.none { it.name == device.name && !isVendorCopy(it.id) }
+    }
     val available = present.filterNot { device -> state.priority.any { it.matches(device) } }
     val alreadyAdded = present.filter { device -> state.priority.any { it.matches(device) } }
 

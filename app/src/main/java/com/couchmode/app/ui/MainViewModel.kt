@@ -79,7 +79,10 @@ class MainViewModel : ViewModel() {
     fun addToPriority(device: PadDevice) {
         val current = state.value.priority
         if (current.any { it.matches(device) } || current.size >= MAX_PRIORITY) return
-        setPriority(current + PriorityEntry(device.name, device.id, connected = true, active = false))
+        // A vendor copy's ID is not the pad's own; store "any id" so the entry keeps matching
+        // the real pad if the service later releases it.
+        val id = if (isVendorCopy(device.id)) "" else device.id
+        setPriority(current + PriorityEntry(device.name, id, connected = true, active = false))
     }
 
     fun removeFromPriority(entry: PriorityEntry) =

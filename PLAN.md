@@ -97,6 +97,15 @@ just status + resume points, not the design doc.
   trigger 255/255 -> 32767, 128/255 -> 16447. Luke confirmed the raw Switch Pro
   pad's right stick did NOT work before this; needs re-testing with the real pad.
   Face-button layout (Nintendo A/B vs Xbox) is still NOT handled - wizard's job.
+- **Pad held by RsMapping (2026-09-30):** if a pad is already connected when
+  the daemon (and decoy) starts, RsMapping keeps holding it and its raw /dev/input
+  node stays hidden, so an entry with the raw id showed "Not connected". The daemon's
+  `open_by_name` now falls back to the vendor copy (2022:3001 non-zero version)
+  of a pad with the same name, and prefers the real node when an entry has an empty
+  id. The app's picker shows a copy when its real twin isn't available and stores
+  such entries with an empty id. Verified on device: entry went to "In use".
+  Note: via the copy the right stick is already in Z/RZ (vendor remap), so the
+  RX/RY remap only matters when the real node is usable.
 - **UI bugs fixed the same day:** rows stuck mid-drag (rows were not keyed by
   controller, so a swap tore down the drag gesture) and some reorders not saved
   (drag handler compared against a stale copy of the list). Verified on the device
