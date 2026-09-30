@@ -22,6 +22,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.couchmode.app.daemon.AccessProbe
+import com.couchmode.app.daemon.AccessResult
 import com.couchmode.app.daemon.DaemonClient
 import com.couchmode.app.daemon.DaemonStatus
 import com.couchmode.app.daemon.EvdevNames
@@ -53,6 +55,7 @@ fun DaemonScreen(modifier: Modifier = Modifier) {
     var watchError by remember { mutableStateOf<String?>(null) }
     val values: SnapshotStateMap<String, Int> = remember { mutableStateMapOf() }
     val context = LocalContext.current
+    var access by remember { mutableStateOf<List<AccessResult>?>(null) }
     var retroidIgnored by remember { mutableStateOf<List<String>?>(null) }
     var retroidNote by remember { mutableStateOf("Not checked") }
 
@@ -115,6 +118,15 @@ fun DaemonScreen(modifier: Modifier = Modifier) {
             }
         )
         Button(onClick = { refresh++ }) { Text("Refresh") }
+
+        Text("Could this run without root?")
+        Button(onClick = { access = AccessProbe.run() }) { Text("Check what this app may open") }
+        access?.let { rows ->
+            Text("Opened from this app's own process (no root, no adb):")
+            rows.forEach { r ->
+                Text((if (r.canOpen) "OK      " else "DENIED  ") + r.path + "  " + r.label + if (r.canOpen) "" else "  (" + r.detail + ")")
+            }
+        }
 
         Text("Retroid input service")
         Text(if (RetroidMapping.isInstalled(context)) "Installed (${RetroidMapping.PACKAGE})" else "Not installed")

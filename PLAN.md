@@ -67,6 +67,19 @@ in the Retroid app's own saved preferences and is name-based only (no Bluetooth/
 - Options given to Luke: (1) one tap per boot via Run script as Root, made smoother in the app;
   (2) ask Retroid for a supported run-at-startup option; (3) Luke explicitly approves a harmless
   test of whether an app may call the service. Recommendation: 1 now, 2 in parallel.
+- **Can it run without root? (measured inside the real app process, Developer tools ->
+  "Check what this app may open"):** yes for everything except the onboard controller.
+  /dev/uinput and every other input node (external pads, the Retroid copies, the virtual mouse,
+  buttons, touch, haptics) open fine as an ordinary app; `/dev/input/event7` ("Retroid Pocket
+  Controller", mode 660 root:input) is DENIED. The daemon has always run as the adb shell user
+  (which is in group `input`), never as root, so root is not required, but something with `input`
+  group access must read the onboard pad. An earlier `run-as` test was not representative (it
+  inherited the shell's groups). Luke also noted OdinTools needed background permission: any
+  always-on app here needs battery-optimization exemption / allow-in-background.
+- Options offered (Luke to choose): root start per boot (now); an unprivileged foreground service
+  for external pads + root tap to add the onboard pad ("two tiers"); ask Retroid; Shizuku-style
+  wireless-debugging start.
+
 - Root start script: `tools/couchmode-start.sh`; pushed as `/sdcard/Download/couchmode-start-0930b.sh`
   (first time it is used through the root menu; `pm` under the root context is still untested).
 - USB pads: Luke wants to test one. Identity may need `phys` (USB port) when `uniq` is empty.
