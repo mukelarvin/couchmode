@@ -166,15 +166,18 @@ private fun RetroidCompatCard(compat: CompatState, onSet: (Boolean) -> Unit) {
             }
             Text(
                 "Retroid's input service copies and hides the controllers it finds, which can rename " +
-                    "CouchMode's virtual controller or change its number in emulators. With this on, " +
-                    "CouchMode keeps that service away from its own controller.",
+                    "CouchMode's virtual controller, change its number in emulators, and change what buttons " +
+                    "a controller sends. With this on, CouchMode keeps that service away from its own " +
+                    "controller and from the controllers in your list.",
                 style = MaterialTheme.typography.bodySmall,
             )
             Text(
                 when {
                     compat.busy -> "Applying\u2026"
                     compat.mode == CompatMode.IGNORE_LIST ->
-                        "Active: Retroid's input service has been told to ignore CouchMode's virtual controller."
+                        "Active: Retroid's input service has been told to ignore CouchMode's virtual controller " +
+                            "and the controllers in your list. After adding a controller, reconnect it once (turn it off " +
+                            "and back on) so this takes effect."
                     compat.mode == CompatMode.DECOY ->
                         "Active (fallback): Retroid's settings couldn't be changed, so CouchMode adds a silent " +
                             "\"CouchMode Decoy (ignore)\" controller instead. You may see it listed in emulators; " +

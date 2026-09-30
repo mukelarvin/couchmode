@@ -14,10 +14,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** The Retroid-compatibility setting and what it resulted in; [mode] is null until first applied. */
@@ -66,28 +70,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         polled.copy(priority = optimistic ?: polled.priority, compat = compat, userNames = names)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ControllersState())
 
+    private val compatLock = Mutex()
+
     init {
-        // Once the daemon is reachable, bring it and the Retroid service into the wanted state.
+        // Once the daemon is reachable, bring it and the Retroid service into the wanted state, and
+        // again whenever the set of external controllers in the list changes (a newly added pad's name
+        // must be on the Retroid service's ignore list before the pad next connects).
         viewModelScope.launch {
             state.first { it.daemonRunning == true }
-            applyRetroidCompat()
+            state.map { externalNames(it.priority) }.distinctUntilChanged().collect { applyRetroidCompat() }
         }
     }
 
-    private fun applyRetroidCompat() {
-        viewModelScope.launch {
-            val enabled = compat.value.enabled
-            compat.value = compat.value.copy(busy = true)
-            val mode = RetroidCompat.apply(getApplication(), enabled)
-            compat.value = CompatState(enabled = enabled, mode = mode, busy = false)
-            refreshNow.tryEmit(Unit)
-        }
+    /** Names of the external controllers in the list. The onboard controls are never given to the ignore list. */
+    private fun externalNames(priority: List<PriorityEntry>): Set<String> =
+        priority.filterNot { isOnboard(it.name) }.map { it.name }.toSet()
+
+    /** Brings the Retroid service's ignore list in line with the current list. One run at a time. */
+    private suspend fun applyRetroidCompat() = compatLock.withLock {
+        val enabled = compat.value.enabled
+        compat.value = compat.value.copy(busy = true)
+        val owned = prefs.getStringSet(KEY_OWNED_IGNORES, emptySet()) ?: emptySet()
+        val result = RetroidCompat.apply(getApplication(), enabled, externalNames(state.value.priority), owned)
+        prefs.edit().putStringSet(KEY_OWNED_IGNORES, result.owned).apply()
+        compat.value = CompatState(enabled = enabled, mode = result.mode, busy = false)
+        refreshNow.tryEmit(Unit)
     }
 
     fun setRetroidCompatEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_RETROID_COMPAT, enabled).apply()
         compat.value = compat.value.copy(enabled = enabled)
-        applyRetroidCompat()
+        viewModelScope.launch { applyRetroidCompat() }
     }
 
     private suspend fun load(): ControllersState {
@@ -146,6 +159,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         const val MAX_PRIORITY = 8
         private const val KEY_RETROID_COMPAT = "retroid_compat"
+        private const val KEY_OWNED_IGNORES = "retroid_owned_ignores"
         private const val NAME_PREFIX = "name:"
     }
 }
