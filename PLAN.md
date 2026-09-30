@@ -49,6 +49,34 @@ just status + resume points, not the design doc.
 
 ## Session log
 
+### 2026-09-30 — multi-source priority (Claude Code)
+
+- Daemon: priority list (up to 8 name + `bus:vendor:product:version` entries).
+  Forwards from the highest-ranked connected one; while a lower entry is active
+  it re-checks once a second and switches UP when a better pad appears; when the
+  active one disappears it falls back down the list. All buttons/axes are
+  released on every switch. The list persists in
+  `/data/local/tmp/couchmode-priority.conf` (mode 666) and is reloaded at start
+  (`-s` on the command line overrides it; default = "Retroid Pocket Controller").
+  Protocol: `PRIORITY<TAB>name<TAB>id...`, `GETPRIO`, `SOURCE` (one-entry
+  shorthand). Polling, not inotify, for hot-plug detection.
+- Verified on device with throwaway uinput "controllers" (no button presses):
+  fallback chain, switch up, switch down on removal, events forwarded, list
+  reloaded after a daemon restart.
+- App: `DaemonScreen` now shows the priority list (Up / Down / Remove, status
+  "in use / connected / not connected", refreshed every 2s) and "Add to
+  priority" on present controllers. Temporary developer UI; Phase 4 replaces it
+  (drag to reorder, nicer add-controller picker).
+- **Luke's request (TODO): make the decoy visible and optional.** The app
+  should explain the decoy controller and have a switch for it, preset on first
+  run by detecting Retroid's software (e.g. `com.rp.mapping` installed), and
+  off for other devices or if Retroid changes the app. Needs a daemon command
+  (e.g. `DECOY 0|1`, create/destroy at runtime) and a saved setting; the
+  decoy is currently always created at daemon start. The flow must tolerate
+  RsMapping already holding a real pad when the decoy is created.
+- Not done yet: canonical virtual layout + rumble, first-run flow, wizard,
+  the face-button swap investigation (parked by Luke), root-menu launch test.
+
 ### 2026-09-29 (g) — decoy device to keep RsMapping off our gamepad (Claude Code)
 
 Experiments (BT pad asleep, so no other external pad; throwaway uinput devices):

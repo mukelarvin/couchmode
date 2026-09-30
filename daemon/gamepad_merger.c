@@ -1,24 +1,29 @@
 // gamepad_merger — CouchMode's root/shell daemon.
 //
-// Finds one physical evdev node by NAME, mirrors its capabilities into a
-// persistent uinput virtual gamepad, grabs the source so apps only see the
-// virtual device, and forwards events 1:1. Multi-source priority comes later;
-// the source is kept in one place (g_source_name / g_src) so it can grow into
-// a list.
+// Keeps a persistent uinput virtual gamepad and forwards events 1:1 from the
+// highest-priority *connected* physical controller in a priority list (devices
+// are matched by NAME plus bus:vendor:product:version). The source is grabbed
+// so apps only see the virtual device. When a higher-priority controller
+// appears the daemon switches to it; when the active one disappears it falls
+// back down the list. The list is saved to CONFIG_PATH so it survives restarts.
 //
 // The app controls the daemon over an abstract unix socket ("@couchmode"),
 // line-based text protocol, one request per line:
 //
 //   PING                  -> PONG
-//   STATUS                -> S<TAB>source<TAB>connected(0/1)<TAB>virtual<TAB>sourceId
+//   STATUS                -> S<TAB>activeOrTopName<TAB>attached(0/1)<TAB>virtual<TAB>id
 //   LIST                  -> D<TAB>name<TAB>bus:vendor:product:version<TAB>isSource(0/1)
 //                            ... then END       (gamepad-looking devices only)
-//   SOURCE <name>[<TAB>id] -> OK    switch the forwarded source device. The optional id
-//                            ("bus:vendor:product:version") disambiguates devices
-//                            that share a name (e.g. a pad and the vendor's virtual copy).
+//   PRIORITY[<TAB>name<TAB>id]... -> OK   replace the priority list (up to 8 name/id
+//                            pairs, highest first). id is "bus:vendor:product:version"
+//                            (hex) and disambiguates devices that share a name (e.g. a
+//                            pad and the vendor's virtual copy); empty = match any.
+//   GETPRIO               -> P<TAB>name<TAB>id<TAB>connected(0/1)<TAB>active(0/1)
+//                            ... then END
+//   SOURCE <name>[<TAB>id] -> OK    shorthand for a one-entry PRIORITY
 //   SNIFF <name>[<TAB>id] -> OK|ERR ...  then "E type code value" lines for
 //                            every EV_KEY/EV_ABS event; "GONE" if the device
-//                            disappears. Works on the current source too (a
+//                            disappears or (for the active source) we switch away. Works on the current source too (a
 //                            grabbed device can't be opened twice, so we tap
 //                            our own forwarding for it).
 //   STOP                  -> OK     stop sniffing
@@ -44,6 +49,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -58,6 +64,8 @@
 #define VIRTUAL_VERSION 1
 #define RESCAN_INTERVAL_MS 1000
 #define MAX_CLIENTS 4
+#define MAX_PRIO 8
+#define CONFIG_PATH "/data/local/tmp/couchmode-priority.conf"
 #define NAME_LEN 256
 #define UID_SHELL 2000
 
@@ -68,8 +76,18 @@
 static volatile sig_atomic_t g_stop = 0;
 static int g_stats = 0;            // -t
 static int g_allowed_uid = -1;     // -u; -1 = accept any client
-static char g_source_name[NAME_LEN] = DEFAULT_SOURCE_NAME;
-static char g_source_id[32] = "";  // optional "bus:vendor:product:version" (hex) to tell same-named devices apart
+struct prio_entry {
+    char name[NAME_LEN];
+    char id[32];  // "bus:vendor:product:version" (hex) to tell same-named devices apart; "" = any
+};
+static struct prio_entry g_prio[MAX_PRIO];
+static int g_nprio = 0;
+static int g_active = -1;          // index into g_prio of the attached source, or -1
+static char g_active_name[NAME_LEN];  // the attached device's real name and id
+static char g_active_id[32];
+// Everything the virtual device declares, so we can release it all when switching sources.
+static int g_keys[KEY_MAX + 1], g_nkeys = 0;
+static int g_axes[ABS_MAX + 1], g_naxes = 0;
 static const char *g_virtual_name = DEFAULT_VIRTUAL_NAME;
 
 static int g_src = -1;             // grabbed source device, or -1 if not present
@@ -177,6 +195,7 @@ static int looks_like_gamepad(int fd) {
 
 // Creates a uinput device declaring the same keys/axes as `src`. Returns the fd or -1.
 static int create_virtual_from(int src, const char *vname) {
+    g_nkeys = g_naxes = 0;
     int ui = open("/dev/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
     if (ui < 0) {
         logf_("open /dev/uinput: %s", strerror(errno));
@@ -197,7 +216,10 @@ static int create_virtual_from(int src, const char *vname) {
         }
         ioctl(ui, UI_SET_EVBIT, EV_KEY);
         for (int k = 0; k <= KEY_MAX; k++)
-            if (TEST_BIT(k, keybits)) ioctl(ui, UI_SET_KEYBIT, k);
+            if (TEST_BIT(k, keybits)) {
+                ioctl(ui, UI_SET_KEYBIT, k);
+                g_keys[g_nkeys++] = k;
+            }
     }
 
     if (TEST_BIT(EV_ABS, evbits)) {
@@ -222,6 +244,7 @@ static int create_virtual_from(int src, const char *vname) {
                 logf_("abs setup %d: %s", a, strerror(errno));
                 goto fail;
             }
+            g_axes[g_naxes++] = a;
         }
     }
 
@@ -246,6 +269,7 @@ static int create_virtual_from(int src, const char *vname) {
             logf_("trigger abs setup %d: %s", code, strerror(errno));
             goto fail;
         }
+        g_axes[g_naxes++] = code;
     }
 
     struct uinput_setup us;
@@ -311,11 +335,47 @@ static int create_decoy(void) {
     return ui;
 }
 
+// ---- priority list --------------------------------------------------------
+
+static void save_config(void) {
+    FILE *f = fopen(CONFIG_PATH, "w");
+    if (!f) {
+        logf_("cannot write %s: %s", CONFIG_PATH, strerror(errno));
+        return;
+    }
+    for (int i = 0; i < g_nprio; i++) fprintf(f, "%s\t%s\n", g_prio[i].name, g_prio[i].id);
+    fchmod(fileno(f), 0666);  // the daemon may run as root or shell across restarts
+    fclose(f);
+}
+
+// Returns the number of entries loaded.
+static int load_config(void) {
+    FILE *f = fopen(CONFIG_PATH, "r");
+    if (!f) return 0;
+    char line[NAME_LEN + 64];
+    g_nprio = 0;
+    while (g_nprio < MAX_PRIO && fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        char *tab = strchr(line, '\t');
+        char *id = "";
+        if (tab) {
+            *tab = 0;
+            id = tab + 1;
+        }
+        if (line[0] == 0) continue;
+        snprintf(g_prio[g_nprio].name, NAME_LEN, "%s", line);
+        snprintf(g_prio[g_nprio].id, sizeof(g_prio[0].id), "%s", id);
+        g_nprio++;
+    }
+    fclose(f);
+    return g_nprio;
+}
+
 // ---- clients --------------------------------------------------------------
 
 struct client {
     int fd;                // -1 = free slot
-    char buf[512];
+    char buf[2048];
     int len;
     int sniff_fd;          // separate device being sniffed, or -1
     int sniff_source;      // 1 = mirror events from the grabbed source instead
@@ -355,8 +415,34 @@ static char *split_id(char *arg) {
     return tab + 1;
 }
 
+// True if this name/id is the device we are currently forwarding from.
 static int is_source(const char *name, const char *id) {
-    return strcmp(name, g_source_name) == 0 && (g_source_id[0] == 0 || strcmp(id, g_source_id) == 0);
+    return g_src >= 0 && strcmp(name, g_active_name) == 0 && (id[0] == 0 || strcmp(id, g_active_id) == 0);
+}
+
+static void detach_source(void);
+static int check_priority(void);
+
+// Replaces the priority list with the given (name, id) pairs, saves it, and re-evaluates.
+static void set_priority(char **f, int n) {
+    g_nprio = n;
+    for (int i = 0; i < n; i++) {
+        snprintf(g_prio[i].name, NAME_LEN, "%s", f[2 * i]);
+        snprintf(g_prio[i].id, sizeof(g_prio[0].id), "%s", f[2 * i + 1]);
+    }
+    save_config();
+    if (g_src >= 0) {
+        int found = -1;  // is the attached device still in the list, and where?
+        for (int i = 0; i < g_nprio; i++)
+            if (strcmp(g_prio[i].name, g_active_name) == 0 &&
+                (g_prio[i].id[0] == 0 || strcmp(g_prio[i].id, g_active_id) == 0)) {
+                found = i;
+                break;
+            }
+        if (found < 0) detach_source();
+        else g_active = found;
+    }
+    check_priority();
 }
 
 static void handle_line(struct client *c, char *line) {
@@ -364,8 +450,9 @@ static void handle_line(struct client *c, char *line) {
         send_str(c->fd, "PONG\n");
     } else if (strcmp(line, "STATUS") == 0) {
         char out[NAME_LEN * 2 + 32];
-        snprintf(out, sizeof(out), "S\t%s\t%d\t%s\t%s\n", g_source_name, g_src >= 0, g_virtual_name,
-                 g_source_id);
+        const char *name = g_src >= 0 ? g_active_name : (g_nprio > 0 ? g_prio[0].name : "");
+        const char *id = g_src >= 0 ? g_active_id : (g_nprio > 0 ? g_prio[0].id : "");
+        snprintf(out, sizeof(out), "S\t%s\t%d\t%s\t%s\n", name, g_src >= 0, g_virtual_name, id);
         send_str(c->fd, out);
     } else if (strcmp(line, "LIST") == 0) {
         DIR *d = opendir("/dev/input");
@@ -394,20 +481,41 @@ static void handle_line(struct client *c, char *line) {
         send_str(c->fd, "END\n");
     } else if (strncmp(line, "SOURCE ", 7) == 0) {
         char *id = split_id(line + 7);
-        snprintf(g_source_name, sizeof(g_source_name), "%s", line + 7);
-        snprintf(g_source_id, sizeof(g_source_id), "%s", id);
-        logf_("source set to \"%s\" [%s]", g_source_name, g_source_id);
-        if (g_src >= 0) {  // detach now; the main loop reattaches by the new name
-            ioctl(g_src, EVIOCGRAB, 0);
-            close(g_src);
-            g_src = -1;
-        }
+        char *one[2] = {line + 7, id};
+        logf_("source set to \"%s\" [%s]", one[0], one[1]);
+        set_priority(one, 1);
         send_str(c->fd, "OK\n");
+    } else if (strncmp(line, "PRIORITY", 8) == 0 && (line[8] == 0 || line[8] == '\t')) {
+        char *f[2 * MAX_PRIO];
+        int nf = 0;
+        char *p = line + 8;
+        while (*p == '\t' && nf < 2 * MAX_PRIO) {
+            *p++ = 0;
+            f[nf++] = p;
+            while (*p && *p != '\t') p++;
+        }
+        if (nf % 2 != 0 || *p != 0) {
+            send_str(c->fd, "ERR badlist\n");
+        } else {
+            logf_("priority list set (%d entries)", nf / 2);
+            set_priority(f, nf / 2);
+            send_str(c->fd, "OK\n");
+        }
+    } else if (strcmp(line, "GETPRIO") == 0) {
+        for (int i = 0; i < g_nprio; i++) {
+            int fd = open_by_name(g_prio[i].name, g_prio[i].id);
+            char out[NAME_LEN + 96];
+            snprintf(out, sizeof(out), "P\t%s\t%s\t%d\t%d\n", g_prio[i].name, g_prio[i].id,
+                     fd >= 0 || i == g_active, i == g_active && g_src >= 0);
+            if (fd >= 0) close(fd);
+            send_str(c->fd, out);
+        }
+        send_str(c->fd, "END\n");
     } else if (strncmp(line, "SNIFF ", 6) == 0) {
         stop_sniff(c);
         const char *name = line + 6;
         const char *id = split_id(line + 6);
-        if (is_source(name, id) || (strcmp(name, g_source_name) == 0 && id[0] == 0)) {
+        if (is_source(name, id)) {
             c->sniff_source = 1;
             send_str(c->fd, "OK\n");
         } else if ((c->sniff_fd = open_by_name(name, id)) >= 0) {
@@ -488,21 +596,48 @@ static int listen_abstract(void) {
 
 // ---- forwarding -----------------------------------------------------------
 
+// Releases every button/axis on the virtual device so nothing stays stuck
+// when the source changes or disappears mid-press.
+static void reset_virtual(void) {
+    if (g_ui < 0) return;
+    struct input_event ev;
+    for (int i = 0; i < g_nkeys + g_naxes + 1; i++) {
+        memset(&ev, 0, sizeof(ev));
+        if (i < g_nkeys) { ev.type = EV_KEY; ev.code = g_keys[i]; }
+        else if (i < g_nkeys + g_naxes) { ev.type = EV_ABS; ev.code = g_axes[i - g_nkeys]; }
+        else { ev.type = EV_SYN; ev.code = SYN_REPORT; }
+        if (write(g_ui, &ev, sizeof(ev)) < 0 && errno != EAGAIN) break;
+    }
+}
+
 static void detach_source(void) {
     if (g_src >= 0) {
         ioctl(g_src, EVIOCGRAB, 0);
         close(g_src);
         g_src = -1;
+        reset_virtual();
+        // Clients tapping the forwarded stream are now watching the wrong device.
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (g_clients[i].fd >= 0 && g_clients[i].sniff_source) {
+                stop_sniff(&g_clients[i]);
+                if (send_str(g_clients[i].fd, "GONE\n") < 0) drop_client(&g_clients[i]);
+            }
+        }
     }
+    g_active = -1;
     g_dropping = 0;
 }
 
-// Opens, configures and grabs the source device. Creates the virtual device on
-// first success. Returns -1 only on a fatal (virtual device) error.
-static int attach_source(void) {
-    int src = open_by_name(g_source_name, g_source_id);
+// Opens, configures and grabs priority entry `idx`. Creates the virtual device
+// on first success. Returns -1 only on a fatal (virtual device) error.
+static int attach_entry(int idx) {
+    int src = open_by_name(g_prio[idx].name, g_prio[idx].id);
     if (src < 0) return 0;  // not present; caller retries later
-    logf_("found source \"%s\"", g_source_name);
+    snprintf(g_active_name, sizeof(g_active_name), "%s", g_prio[idx].name);
+    g_active_id[0] = 0;
+    struct input_id iid;
+    if (ioctl(src, EVIOCGID, &iid) == 0) format_id(&iid, g_active_id, sizeof(g_active_id));
+    logf_("source #%d: \"%s\" [%s]", idx, g_active_name, g_active_id);
     if (g_ui < 0) {
         g_ui = create_virtual_from(src, g_virtual_name);
         if (g_ui < 0) {
@@ -530,7 +665,24 @@ static int attach_source(void) {
     g_synth_triggers = TEST_BIT(BTN_TL2, keybits) || TEST_BIT(BTN_TR2, keybits);
     g_analog_seen[0] = g_analog_seen[1] = 0;
     g_src = src;
+    g_active = idx;
     g_dropping = 0;
+    reset_virtual();
+    return 0;
+}
+
+// Attaches the best present source. Only entries ranked above the current one
+// matter (when already attached): if one of them has appeared, switch to it.
+// Returns -1 only on a fatal error.
+static int check_priority(void) {
+    int limit = g_src >= 0 ? g_active : g_nprio;
+    for (int i = 0; i < limit; i++) {
+        int fd = open_by_name(g_prio[i].name, g_prio[i].id);
+        if (fd < 0) continue;
+        close(fd);
+        detach_source();
+        return attach_entry(i);
+    }
     return 0;
 }
 
@@ -541,7 +693,7 @@ static int pump_source(void) {
     ssize_t n = read(g_src, evs, sizeof(evs));
     if (n < 0) {
         if (errno == EINTR || errno == EAGAIN) return 0;
-        logf_("source gone (read: %s)", strerror(errno));  // ENODEV when unplugged
+        logf_("source \"%s\" gone (read: %s)", g_active_name, strerror(errno));  // ENODEV when unplugged
         detach_source();
         return 0;
     }
@@ -611,11 +763,15 @@ static void pump_sniff(struct client *c) {
 }
 
 int main(int argc, char **argv) {
+    int cli_source = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-t") == 0) g_stats = 1;
         else if (i + 1 < argc && strcmp(argv[i], "-u") == 0) g_allowed_uid = atoi(argv[++i]);
-        else if (i + 1 < argc && strcmp(argv[i], "-s") == 0)
-            snprintf(g_source_name, sizeof(g_source_name), "%s", argv[++i]);
+        else if (i + 1 < argc && strcmp(argv[i], "-s") == 0) {
+            snprintf(g_prio[0].name, NAME_LEN, "%s", argv[++i]);
+            g_nprio = 1;
+            cli_source = 1;
+        }
         else if (i + 1 < argc && strcmp(argv[i], "-n") == 0) g_virtual_name = argv[++i];
         else {
             fprintf(stderr, "usage: %s [-t] [-u app_uid] [-s source name] [-n virtual name]\n", argv[0]);
@@ -632,6 +788,13 @@ int main(int argc, char **argv) {
 
     for (int i = 0; i < MAX_CLIENTS; i++) g_clients[i].fd = g_clients[i].sniff_fd = -1;
 
+    // Priority list: -s wins, else the saved list, else the Retroid's own controls.
+    if (!cli_source && load_config() > 0) logf_("loaded %d priority entries from %s", g_nprio, CONFIG_PATH);
+    if (g_nprio == 0) {
+        snprintf(g_prio[0].name, NAME_LEN, "%s", DEFAULT_SOURCE_NAME);
+        g_nprio = 1;
+    }
+
     // Listen first: if the socket name is taken, another daemon is already running.
     int lfd = listen_abstract();
     if (lfd < 0) {
@@ -644,11 +807,12 @@ int main(int argc, char **argv) {
     g_decoy = create_decoy();
     if (g_decoy >= 0) usleep(1500 * 1000);
 
-    long last_attach_try = 0;
+    long last_check = 0;
     while (!g_stop) {
-        if (g_src < 0 && now_us() - last_attach_try >= RESCAN_INTERVAL_MS * 1000L) {
-            last_attach_try = now_us();
-            if (attach_source() < 0) break;
+        // Only needed while something above the active source could still appear.
+        if (g_active != 0 && now_us() - last_check >= RESCAN_INTERVAL_MS * 1000L) {
+            last_check = now_us();
+            if (check_priority() < 0) break;
         }
 
         // pfds: [0] listen, [1] source, then per client: client fd, sniff fd.
@@ -666,7 +830,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        int r = poll(pfds, np, g_src < 0 ? RESCAN_INTERVAL_MS : 500);
+        int r = poll(pfds, np, g_active != 0 ? RESCAN_INTERVAL_MS : 500);
         if (r < 0) {
             if (errno == EINTR) continue;
             logf_("poll: %s", strerror(errno));
@@ -681,7 +845,7 @@ int main(int argc, char **argv) {
                     // The client handlers below may have detached the source this round.
                     if (g_src != pfds[p].fd) break;
                     if (pfds[p].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-                        logf_("source gone (poll revents 0x%x)", pfds[p].revents);
+                        logf_("source \"%s\" gone (poll revents 0x%x)", g_active_name, pfds[p].revents);
                         detach_source();
                     } else if (pump_source() < 0) {
                         g_stop = 1;

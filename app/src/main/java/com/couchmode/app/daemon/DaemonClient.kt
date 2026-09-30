@@ -21,6 +21,9 @@ data class DaemonStatus(
     val sourceId: String,
 )
 
+/** One row of the daemon's priority list, highest priority first. */
+data class PriorityEntry(val name: String, val id: String, val connected: Boolean, val active: Boolean)
+
 data class RawEvent(val type: Int, val code: Int, val value: Int)
 
 /**
@@ -83,6 +86,18 @@ object DaemonClient {
         }
 
     /** Devices are identified by name plus id: a pad and the vendor's virtual copy can share a name. */
+    suspend fun priority(): List<PriorityEntry> =
+        request("GETPRIO", terminator = "END").mapNotNull { line ->
+            val f = line.split('\t')
+            if (f.size == 5 && f[0] == "P") PriorityEntry(f[1], f[2], f[3] == "1", f[4] == "1") else null
+        }
+
+    /** Replaces the daemon's priority list (highest first). The daemon saves it and switches sources as needed. */
+    suspend fun setPriority(entries: List<PriorityEntry>) {
+        val command = "PRIORITY" + entries.joinToString("") { "\t${it.name}\t${it.id}" }
+        check(request(command).firstOrNull() == "OK") { "daemon rejected PRIORITY" }
+    }
+
     suspend fun setSource(device: PadDevice) {
         check(request("SOURCE ${device.name}\t${device.id}").firstOrNull() == "OK") { "daemon rejected SOURCE" }
     }
