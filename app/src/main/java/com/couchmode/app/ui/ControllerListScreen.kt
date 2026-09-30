@@ -4,6 +4,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,8 +19,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
@@ -30,9 +33,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -72,9 +77,23 @@ fun ControllerListScreen(
     onAddController: () -> Unit,
     onOpenDeveloperTools: () -> Unit,
     onSetRetroidCompat: (Boolean) -> Unit,
+    onOpenWizard: (PriorityEntry) -> Unit,
+    onSetUserName: (key: String, name: String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf<PriorityEntry?>(null) }
+    renaming?.let { entry ->
+        RenameDialog(
+            current = state.userNames[entry.nameKey()].orEmpty(),
+            defaultName = displayName(entry.name),
+            onDismiss = { renaming = null },
+            onConfirm = {
+                onSetUserName(entry.nameKey(), it)
+                renaming = null
+            },
+        )
+    }
     Scaffold(
         modifier = modifier,
         topBar = {
@@ -106,7 +125,14 @@ fun ControllerListScreen(
         ) {
             if (state.daemonRunning == false) DaemonNotRunningCard()
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                PriorityList(state.priority, onReorder, onRemove)
+                PriorityList(
+                    entries = state.priority,
+                    userNames = state.userNames,
+                    onReorder = onReorder,
+                    onRemove = onRemove,
+                    onOpen = onOpenWizard,
+                    onRename = { renaming = it },
+                )
                 OutlinedButton(
                     onClick = onAddController,
                     enabled = state.daemonRunning == true && state.priority.size < MainViewModel.MAX_PRIORITY,
@@ -165,6 +191,27 @@ private fun RetroidCompatCard(compat: CompatState, onSet: (Boolean) -> Unit) {
     }
 }
 
+/** Asks for a name for a controller, for example "Purple Pro controller". Blank restores the default. */
+@Composable
+private fun RenameDialog(current: String, defaultName: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+    var text by remember { mutableStateOf(current) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Name this controller") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it.take(40) },
+                singleLine = true,
+                placeholder = { Text(defaultName) },
+                supportingText = { Text("Leave empty to use \"$defaultName\".") },
+            )
+        },
+        confirmButton = { TextButton(onClick = { onConfirm(text) }) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
 @Composable
 private fun DaemonNotRunningCard() {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
@@ -181,8 +228,11 @@ private fun DaemonNotRunningCard() {
 @Composable
 private fun PriorityList(
     entries: List<PriorityEntry>,
+    userNames: Map<String, String>,
     onReorder: (List<PriorityEntry>) -> Unit,
     onRemove: (PriorityEntry) -> Unit,
+    onOpen: (PriorityEntry) -> Unit,
+    onRename: (PriorityEntry) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     // The drag handlers below live as long as their row does, so they must read the
@@ -221,6 +271,9 @@ private fun PriorityList(
             ControllerRow(
                 rank = index + 1,
                 entry = entry,
+                title = labelFor(entry.name, entry.nameKey(), userNames),
+                onOpen = { onOpen(entry) },
+                onRename = { onRename(entry) },
                 modifier = Modifier
                     .onSizeChanged { heights[key] = it.height }
                     .zIndex(if (dragging) 1f else 0f)
@@ -283,6 +336,9 @@ private fun PriorityList(
 private fun ControllerRow(
     rank: Int,
     entry: PriorityEntry,
+    title: String,
+    onOpen: () -> Unit,
+    onRename: () -> Unit,
     onRemove: () -> Unit,
     dragHandle: Modifier,
     modifier: Modifier = Modifier,
@@ -293,6 +349,7 @@ private fun ControllerRow(
         modifier = modifier
             .fillMaxWidth()
             .background(background)
+            .clickable(onClick = onOpen)
             .alpha(if (entry.connected) 1f else 0.55f)
             .padding(start = 8.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -323,13 +380,20 @@ private fun ControllerRow(
             )
         }
         Column(Modifier.weight(1f)) {
-            Text(displayName(entry.name), style = MaterialTheme.typography.bodyLarge)
+            Text(title, style = MaterialTheme.typography.bodyLarge)
             Text(
                 when {
                     entry.active -> "In use"
                     entry.connected -> "Connected"
                     else -> "Not connected"
-                } + if (entry.uniq.isNotEmpty()) " \u00b7 ${shortUniq(entry.uniq)}" else "",
+                } + (if (entry.uniq.isNotEmpty()) " \u00b7 ${shortUniq(entry.uniq)}" else "") +
+                    // The onboard controls already use the standard layout; others should be set up once.
+                    when {
+                        isOnboard(entry.name) -> ""
+                        entry.mapping == 1 -> " \u00b7 Buttons set up"
+                        entry.mapping == 2 -> " \u00b7 Set up buttons again"
+                        else -> " \u00b7 Tap to set up buttons"
+                    },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -341,6 +405,9 @@ private fun ControllerRow(
                 .clip(CircleShape)
                 .background(if (entry.connected) ConnectedGreen else Color.Gray)
         )
+        IconButton(onClick = onRename) {
+            Icon(Icons.Default.Edit, contentDescription = "Rename")
+        }
         IconButton(onClick = onRemove) {
             Icon(Icons.Default.Delete, contentDescription = "Remove from list")
         }

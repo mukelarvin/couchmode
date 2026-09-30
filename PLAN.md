@@ -49,6 +49,45 @@ just status + resume points, not the design doc.
 
 ## Session log
 
+### 2026-09-30 (e) - button wizard and friendly names (Claude Code)
+
+Luke wanted the wizard so the A/B (and X/Y) buttons land in the right places, and friendly
+per-controller names ("Purple Pro controller"). Both built; the wizard is positional, not
+lettered (a diagram highlights where to press), because "A" is in a different place on Xbox and
+Nintendo pads.
+
+- **Daemon: per-controller button maps.** raw evdev key code -> canonical code, saved in
+  `/data/local/tmp/couchmode-maps.conf` and keyed by the controller entry (name, id, uniq).
+  Commands: `SETMAP<TAB>name<TAB>id<TAB>uniq<TAB>kind<TAB>from=to,...` (empty pairs clear),
+  `GETMAP`, `MUTE 0|1`; GETPRIO gets a 7th field (0 none, 1 saved, 2 saved but learned the other
+  way); SNIFF replies `OK<TAB>raw|copy`. While a map is active, mapped codes are translated and
+  gamepad-range buttons (BTN_SOUTH..BTN_THUMBR) the map does not cover are dropped; other keys
+  pass through. Trigger synthesis now runs on the translated code.
+- **kind = raw|copy.** A map learned on the Retroid service's copy of a pad is wrong for the real
+  device and vice versa (the copy's layout is already remapped by the vendor). The map records
+  which one it was learned on and is only applied while the source is reached the same way; the
+  list row shows "Set up buttons again" when it doesn't match.
+- **MUTE:** the wizard's connection mutes the active source so its presses don't reach the
+  virtual gamepad (otherwise the east button would act as Back inside the app). Released when
+  the connection closes.
+- **App:** `wizard/WizardViewModel.kt` (13 steps: 4 face buttons, bumpers, digital triggers,
+  select, start, home, stick clicks; 10s auto-skip; Skip / Retry / Back; ignores a press already
+  used; ignores input in the first 0.4s of a step), `ui/WizardScreen.kt` (controller diagram that
+  highlights the position, progress dots, result screen). Tap a controller row to open it.
+  Analog triggers: skip those two steps (their axes already pass through).
+- **Friendly names:** pencil button on each row; stored in the app's preferences, keyed by
+  name|id|uniq so two identical pads can be named differently; blank restores the default.
+  Used in the list, picker and wizard title.
+- **Verified on the device with fake pads (no presses):** maps translate, uncovered buttons are
+  dropped, a wrong-kind map is refused, MUTE silences the virtual gamepad, maps survive a daemon
+  restart; the wizard run end to end against a fake pad with a scrambled layout produced exactly
+  the expected 13 pairs (and stayed on screen although a press was the east button = Back).
+  Rename dialog and persistence checked through the UI.
+- **NOT verified:** with the real 8BitDo pads (needs Luke). Particularly: whether setting up the
+  pad fixes A/B in Dolphin, and which kind (raw or copy) each real pad is reached through.
+- Not done: analog trigger axis mapping and stick axis choice in the wizard (RX/RY -> Z/RZ and
+  Z/RZ -> triggers are automatic for Linux-layout pads), d-pad as buttons, "reset all" UI.
+
 ### 2026-09-30 (d) — two identical pads (Claude Code)
 
 Luke connected two "Nintendo Switch Pro Controller"s and could only add one: the

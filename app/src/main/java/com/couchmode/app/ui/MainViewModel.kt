@@ -34,6 +34,8 @@ data class ControllersState(
     /** Gamepad-like devices present right now (includes ones already in [priority]). */
     val devices: List<PadDevice> = emptyList(),
     val compat: CompatState = CompatState(),
+    /** User-chosen controller names, keyed by nameKey(name, id, uniq). */
+    val userNames: Map<String, String> = emptyMap(),
 )
 
 private const val POLL_MS = 2000L
@@ -42,6 +44,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val refreshNow = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     private val prefs = application.getSharedPreferences("couchmode", android.content.Context.MODE_PRIVATE)
     private val compat = MutableStateFlow(CompatState(enabled = prefs.getBoolean(KEY_RETROID_COMPAT, true)))
+    private val userNames = MutableStateFlow(loadUserNames())
 
     // A reorder shown immediately, until the daemon's own list catches up.
     private val optimisticPriority = MutableStateFlow<List<PriorityEntry>?>(null)
@@ -59,8 +62,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         initialValue = ControllersState(),
     )
 
-    val state: StateFlow<ControllersState> = combine(polled, optimisticPriority, compat) { polled, optimistic, compat ->
-        polled.copy(priority = optimistic ?: polled.priority, compat = compat)
+    val state: StateFlow<ControllersState> = combine(polled, optimisticPriority, compat, userNames) { polled, optimistic, compat, names ->
+        polled.copy(priority = optimistic ?: polled.priority, compat = compat, userNames = names)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ControllersState())
 
     init {
@@ -96,6 +99,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    private fun loadUserNames(): Map<String, String> =
+        prefs.all.filterKeys { it.startsWith(NAME_PREFIX) }
+            .mapKeys { it.key.removePrefix(NAME_PREFIX) }
+            .mapNotNull { (k, v) -> (v as? String)?.let { k to it } }
+            .toMap()
+
+    /** Gives a controller a name of the user's choosing; a blank name goes back to the default. */
+    fun setUserName(key: String, name: String) {
+        val trimmed = name.trim()
+        prefs.edit().apply {
+            if (trimmed.isEmpty()) remove(NAME_PREFIX + key) else putString(NAME_PREFIX + key, trimmed)
+        }.apply()
+        userNames.value = loadUserNames()
+    }
+
     fun refresh() {
         refreshNow.tryEmit(Unit)
     }
@@ -128,6 +146,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         const val MAX_PRIORITY = 8
         private const val KEY_RETROID_COMPAT = "retroid_compat"
+        private const val NAME_PREFIX = "name:"
     }
 }
 

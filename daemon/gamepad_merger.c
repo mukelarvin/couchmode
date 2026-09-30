@@ -20,15 +20,25 @@
 //                            string (the Bluetooth address for a BT pad). Each is empty = match
 //                            any. id and uniq tell same-named devices apart: a pad and the
 //                            vendor's copy of it, or two identical pads.
-//   GETPRIO               -> P<TAB>name<TAB>id<TAB>uniq<TAB>connected(0/1)<TAB>active(0/1)
+//   GETPRIO               -> P<TAB>name<TAB>id<TAB>uniq<TAB>connected(0/1)<TAB>active(0/1)<TAB>map
+//                            (map: 0 none, 1 saved and valid, 2 saved but learned the other way)
 //                            ... then END
 //   SOURCE <name>[<TAB>id[<TAB>uniq]] -> OK    shorthand for a one-entry PRIORITY
-//   SNIFF <name>[<TAB>id[<TAB>uniq]] -> OK|ERR ...  then "E type code value" lines for
+//   SNIFF <name>[<TAB>id[<TAB>uniq]] -> OK<TAB>raw|copy | ERR ...  then "E type code value" lines for
 //                            every EV_KEY/EV_ABS event; "GONE" if the device
 //                            disappears or (for the active source) we switch away. Works on the current source too (a
 //                            grabbed device can't be opened twice, so we tap
 //                            our own forwarding for it).
 //   STOP                  -> OK     stop sniffing
+//   MUTE 0|1              -> OK     while 1 and this client is sniffing the ACTIVE source, that
+//                            source's events are not forwarded to the virtual gamepad (the button
+//                            wizard uses it so presses don't click through the UI). Per client.
+//   SETMAP<TAB>name<TAB>id<TAB>uniq<TAB>kind<TAB>from=to,from=to,...  -> OK   save the button map
+//                            for that controller entry: raw evdev key code -> canonical code
+//                            (decimal). `kind` is "raw" or "copy": whether it was learned on the
+//                            real device or on the Retroid service's copy of it; a map is applied
+//                            only while the source is reached the same way. Empty pairs clear it.
+//   GETMAP<TAB>name<TAB>id<TAB>uniq       -> M<TAB>kind<TAB>pairs   (empty fields if none)
 //   DECOY 0|1             -> OK     destroy/create the decoy gamepad (see create_decoy); saved
 //   RECREATE              -> OK     destroy and re-create the virtual gamepad (new device, same
 //                            source). Needed after the Retroid service's ignore list changes,
@@ -90,9 +100,26 @@ struct prio_entry {
 static struct prio_entry g_prio[MAX_PRIO];
 static int g_nprio = 0;
 static int g_active = -1;          // index into g_prio of the attached source, or -1
+static char g_active_kind[8] = "";  // "raw" or "copy": how the attached source is reached (see is_vendor_copy_id)
 static char g_active_name[NAME_LEN];  // the attached device's real name and id
 static char g_active_id[32];
 static char g_active_uniq[40];
+// Per-controller button maps (raw evdev key code -> canonical code), learned by the wizard.
+#define MAPS_PATH "/data/local/tmp/couchmode-maps.conf"
+#define MAX_MAPS 16
+#define MAX_MAP_PAIRS 24
+struct devmap {
+    char name[NAME_LEN];
+    char id[32];
+    char uniq[40];
+    char kind[8];
+    int n;
+    int from[MAX_MAP_PAIRS], to[MAX_MAP_PAIRS];
+};
+static struct devmap g_maps[MAX_MAPS];
+static int g_nmaps = 0;
+static const struct devmap *g_cur_map = NULL;  // map applied to the attached source, or NULL
+
 // Everything the virtual device declares, so we can release it all when switching sources.
 static int g_keys[KEY_MAX + 1], g_nkeys = 0;
 static int g_axes[ABS_MAX + 1], g_naxes = 0;
@@ -177,6 +204,8 @@ static void format_id(const struct input_id *id, char *out, size_t n) {
 static int is_vendor_copy_id(const char *id) {
     return strncmp(id, "0003:2022:3001:", 15) == 0 && strcmp(id + 15, "0000") != 0;
 }
+
+static const char *kind_of_id(const char *id) { return is_vendor_copy_id(id) ? "copy" : "raw"; }
 
 // Devices the kernel knows, from /proc/bus/input/devices. Unlike /dev/input this still
 // lists a pad whose node the Retroid service has hidden, and it shows the pad's uniq.
@@ -516,6 +545,103 @@ static int load_config(void) {
     return g_nprio;
 }
 
+// ---- button maps ----------------------------------------------------------
+
+static int is_canonical_button(int code) { return code >= BTN_SOUTH && code <= BTN_THUMBR; }
+
+static int map_code(const struct devmap *m, int code) {
+    for (int i = 0; i < m->n; i++)
+        if (m->from[i] == code) return m->to[i];
+    return -1;
+}
+
+static struct devmap *find_map(const char *name, const char *id, const char *uniq) {
+    for (int i = 0; i < g_nmaps; i++)
+        if (strcmp(g_maps[i].name, name) == 0 && strcmp(g_maps[i].id, id) == 0 && strcmp(g_maps[i].uniq, uniq) == 0)
+            return &g_maps[i];
+    return NULL;
+}
+
+static void format_pairs(const struct devmap *m, char *out, size_t cap) {
+    out[0] = 0;
+    size_t len = 0;
+    for (int i = 0; i < m->n && len + 16 < cap; i++)
+        len += (size_t)snprintf(out + len, cap - len, "%s%d=%d", i ? "," : "", m->from[i], m->to[i]);
+}
+
+static void parse_pairs(const char *s, struct devmap *m) {
+    m->n = 0;
+    while (*s && m->n < MAX_MAP_PAIRS) {
+        int a, b, used = 0;
+        if (sscanf(s, "%d=%d%n", &a, &b, &used) != 2) break;
+        m->from[m->n] = a;
+        m->to[m->n] = b;
+        m->n++;
+        s += used;
+        if (*s == ',') s++;
+    }
+}
+
+static void save_maps(void) {
+    FILE *f = fopen(MAPS_PATH, "w");
+    if (!f) {
+        logf_("cannot write %s: %s", MAPS_PATH, strerror(errno));
+        return;
+    }
+    for (int i = 0; i < g_nmaps; i++) {
+        char pairs[512];
+        format_pairs(&g_maps[i], pairs, sizeof(pairs));
+        fprintf(f, "%s\t%s\t%s\t%s\t%s\n", g_maps[i].name, g_maps[i].id, g_maps[i].uniq, g_maps[i].kind, pairs);
+    }
+    fchmod(fileno(f), 0666);
+    fclose(f);
+}
+
+static void load_maps(void) {
+    FILE *f = fopen(MAPS_PATH, "r");
+    if (!f) return;
+    char line[NAME_LEN + 700];
+    g_nmaps = 0;
+    while (g_nmaps < MAX_MAPS && fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        char *fld[5];
+        int nf = 0;
+        char *p = line;
+        while (nf < 5) {
+            fld[nf++] = p;
+            char *t = strchr(p, '\t');
+            if (!t) break;
+            *t = 0;
+            p = t + 1;
+        }
+        if (nf != 5 || fld[0][0] == 0) continue;
+        struct devmap *m = &g_maps[g_nmaps++];
+        memset(m, 0, sizeof(*m));
+        snprintf(m->name, sizeof(m->name), "%s", fld[0]);
+        snprintf(m->id, sizeof(m->id), "%s", fld[1]);
+        snprintf(m->uniq, sizeof(m->uniq), "%s", fld[2]);
+        snprintf(m->kind, sizeof(m->kind), "%s", fld[3]);
+        parse_pairs(fld[4], m);
+    }
+    fclose(f);
+}
+
+// Works out which map (if any) applies to the attached source. A map learned on the real
+// device is wrong for the Retroid copy of it (and vice versa), so kinds must match.
+static void refresh_cur_map(void) {
+    g_cur_map = NULL;
+    if (g_src < 0 || g_active < 0) return;
+    const struct devmap *m = find_map(g_prio[g_active].name, g_prio[g_active].id, g_prio[g_active].uniq);
+    if (!m) return;
+    if (m->kind[0] && strcmp(m->kind, g_active_kind) != 0) {
+        logf_("button map for \"%s\" was learned on the %s device but the source is now the %s one: not applying",
+              m->name, m->kind, g_active_kind);
+        return;
+    }
+    g_cur_map = m;
+    logf_("applying button map for \"%s\" (%d buttons)", m->name, m->n);
+}
+
 // ---- clients --------------------------------------------------------------
 
 struct client {
@@ -524,6 +650,7 @@ struct client {
     int len;
     int sniff_fd;          // separate device being sniffed, or -1
     int sniff_source;      // 1 = mirror events from the grabbed source instead
+    int mute;              // 1 = don't forward the active source while this client sniffs it
 };
 static struct client g_clients[MAX_CLIENTS];
 
@@ -543,6 +670,7 @@ static void drop_client(struct client *c) {
     if (c->fd >= 0) close(c->fd);
     c->fd = -1;
     c->len = 0;
+    c->mute = 0;
 }
 
 static void send_event_line(struct client *c, const struct input_event *ev) {
@@ -601,6 +729,7 @@ static void set_priority(char **f, int n) {
         else g_active = found;
     }
     check_priority();
+    refresh_cur_map();
 }
 
 static void handle_line(struct client *c, char *line) {
@@ -672,9 +801,20 @@ static void handle_line(struct client *c, char *line) {
     } else if (strcmp(line, "GETPRIO") == 0) {
         for (int i = 0; i < g_nprio; i++) {
             int fd = open_by_name(g_prio[i].name, g_prio[i].id, g_prio[i].uniq);
-            char out[NAME_LEN + 128];
-            snprintf(out, sizeof(out), "P\t%s\t%s\t%s\t%d\t%d\n", g_prio[i].name, g_prio[i].id, g_prio[i].uniq,
-                     fd >= 0 || i == g_active, i == g_active && g_src >= 0);
+            int mapstate = 0;
+            const struct devmap *m = find_map(g_prio[i].name, g_prio[i].id, g_prio[i].uniq);
+            if (m) {
+                mapstate = 1;
+                struct input_id iid;
+                char idstr[32];
+                if (fd >= 0 && ioctl(fd, EVIOCGID, &iid) == 0) {
+                    format_id(&iid, idstr, sizeof(idstr));
+                    if (m->kind[0] && strcmp(m->kind, kind_of_id(idstr)) != 0) mapstate = 2;
+                }
+            }
+            char out[NAME_LEN + 140];
+            snprintf(out, sizeof(out), "P\t%s\t%s\t%s\t%d\t%d\t%d\n", g_prio[i].name, g_prio[i].id, g_prio[i].uniq,
+                     fd >= 0 || i == g_active, i == g_active && g_src >= 0, mapstate);
             if (fd >= 0) close(fd);
             send_str(c->fd, out);
         }
@@ -685,9 +825,15 @@ static void handle_line(struct client *c, char *line) {
         split3(line + 6, &name, &id, &uniq);
         if (is_source(name, id, uniq)) {
             c->sniff_source = 1;
-            send_str(c->fd, "OK\n");
+            char ok[32];
+            snprintf(ok, sizeof(ok), "OK\t%s\n", g_active_kind);
+            send_str(c->fd, ok);
         } else if ((c->sniff_fd = open_by_name(name, id, uniq)) >= 0) {
-            send_str(c->fd, "OK\n");
+            struct input_id iid;
+            char idstr[32] = "", ok[32];
+            if (ioctl(c->sniff_fd, EVIOCGID, &iid) == 0) format_id(&iid, idstr, sizeof(idstr));
+            snprintf(ok, sizeof(ok), "OK\t%s\n", kind_of_id(idstr));
+            send_str(c->fd, ok);
         } else {
             send_str(c->fd, "ERR notfound\n");
         }
@@ -699,6 +845,54 @@ static void handle_line(struct client *c, char *line) {
     } else if (strcmp(line, "RECREATE") == 0) {
         recreate_virtual();
         send_str(c->fd, "OK\n");
+    } else if (strncmp(line, "MUTE ", 5) == 0 && (line[5] == '0' || line[5] == '1') && line[6] == 0) {
+        c->mute = line[5] == '1';
+        send_str(c->fd, "OK\n");
+    } else if (strncmp(line, "SETMAP\t", 7) == 0) {
+        char *fld[5];
+        int nf = 0;
+        char *p = line + 7;
+        while (nf < 5) {
+            fld[nf++] = p;
+            char *t = strchr(p, '\t');
+            if (!t) break;
+            *t = 0;
+            p = t + 1;
+        }
+        if (nf != 5) {
+            send_str(c->fd, "ERR badmap\n");
+        } else {
+            struct devmap *m = find_map(fld[0], fld[1], fld[2]);
+            if (fld[4][0] == 0) {  // clear
+                if (m) {
+                    *m = g_maps[--g_nmaps];
+                    memset(&g_maps[g_nmaps], 0, sizeof(g_maps[0]));
+                }
+            } else {
+                if (!m && g_nmaps < MAX_MAPS) {
+                    m = &g_maps[g_nmaps++];
+                    memset(m, 0, sizeof(*m));
+                    snprintf(m->name, sizeof(m->name), "%s", fld[0]);
+                    snprintf(m->id, sizeof(m->id), "%s", fld[1]);
+                    snprintf(m->uniq, sizeof(m->uniq), "%s", fld[2]);
+                }
+                if (m) {
+                    snprintf(m->kind, sizeof(m->kind), "%s", fld[3]);
+                    parse_pairs(fld[4], m);
+                }
+            }
+            save_maps();
+            refresh_cur_map();
+            send_str(c->fd, m || fld[4][0] == 0 ? "OK\n" : "ERR full\n");
+        }
+    } else if (strncmp(line, "GETMAP\t", 7) == 0) {
+        char *a, *b, *u;
+        split3(line + 7, &a, &b, &u);
+        const struct devmap *m = find_map(a, b, u);
+        char pairs[512] = "", out[600];
+        if (m) format_pairs(m, pairs, sizeof(pairs));
+        snprintf(out, sizeof(out), "M\t%s\t%s\n", m ? m->kind : "", pairs);
+        send_str(c->fd, out);
     } else if (strcmp(line, "STOP") == 0) {
         stop_sniff(c);
         send_str(c->fd, "OK\n");
@@ -747,6 +941,7 @@ static void accept_client(int lfd) {
             g_clients[i].len = 0;
             g_clients[i].sniff_fd = -1;
             g_clients[i].sniff_source = 0;
+            g_clients[i].mute = 0;
             return;
         }
     }
@@ -810,6 +1005,7 @@ static void detach_source(void) {
         }
     }
     g_active = -1;
+    g_cur_map = NULL;
     g_dropping = 0;
 }
 
@@ -822,6 +1018,7 @@ static int attach_entry(int idx) {
     g_active_id[0] = 0;
     struct input_id iid;
     if (ioctl(src, EVIOCGID, &iid) == 0) format_id(&iid, g_active_id, sizeof(g_active_id));
+    snprintf(g_active_kind, sizeof(g_active_kind), "%s", kind_of_id(g_active_id));
     read_uniq(src, g_active_uniq, sizeof(g_active_uniq));
     // If we attached the vendor's copy of a held pad, record the pad's own identity.
     struct kdev held;
@@ -871,6 +1068,7 @@ static int attach_entry(int idx) {
     g_src = src;
     g_active = idx;
     g_dropping = 0;
+    refresh_cur_map();
     reset_virtual();
     return 0;
 }
@@ -931,27 +1129,36 @@ static int pump_source(void) {
         out.type = ev->type;
         out.code = ev->code;
         out.value = ev->value;
+        int forward_it = 1;
+        if (g_cur_map && ev->type == EV_KEY) {
+            int to = map_code(g_cur_map, ev->code);
+            if (to >= 0) out.code = to;
+            else if (is_canonical_button(ev->code)) forward_it = 0;  // a gamepad button the map doesn't cover
+        }
+        // The button wizard mutes forwarding while it listens, so presses don't click through the UI.
+        for (int c = 0; c < MAX_CLIENTS; c++)
+            if (g_clients[c].fd >= 0 && g_clients[c].mute && g_clients[c].sniff_source) forward_it = 0;
         if (ev->type == EV_ABS && ev->code <= ABS_MAX && g_remap[ev->code].active) {
             const struct axis_remap *m = &g_remap[ev->code];
             out.code = m->dst;
             out.value = (int)(g_dmin[m->dst] + ((long)ev->value - m->smin) * (g_dmax[m->dst] - g_dmin[m->dst]) /
                                                    (m->smax - m->smin));
         }
-        if (write(g_ui, &out, sizeof(out)) < 0) {
+        if (forward_it && write(g_ui, &out, sizeof(out)) < 0) {
             if (errno == EAGAIN || errno == EINTR) continue;
             logf_("write uinput: %s", strerror(errno));
             return -1;
         }
         if (out.type == EV_ABS && out.code == ABS_BRAKE) g_analog_seen[0] = 1;
         if (out.type == EV_ABS && out.code == ABS_GAS) g_analog_seen[1] = 1;
-        if (g_synth_triggers && ev->type == EV_KEY && (ev->code == BTN_TL2 || ev->code == BTN_TR2) &&
-            !g_analog_seen[ev->code == BTN_TL2 ? 0 : 1]) {
+        if (forward_it && g_synth_triggers && out.type == EV_KEY && (out.code == BTN_TL2 || out.code == BTN_TR2) &&
+            !g_analog_seen[out.code == BTN_TL2 ? 0 : 1]) {
             // Android convention: left trigger = ABS_BRAKE, right = ABS_GAS. Instant 0/max, no ramping.
             struct input_event ax;
             memset(&ax, 0, sizeof(ax));
             ax.type = EV_ABS;
-            ax.code = ev->code == BTN_TL2 ? ABS_BRAKE : ABS_GAS;
-            ax.value = ev->value ? g_trigger_max : 0;
+            ax.code = out.code == BTN_TL2 ? ABS_BRAKE : ABS_GAS;
+            ax.value = out.value ? g_trigger_max : 0;
             if (write(g_ui, &ax, sizeof(ax)) < 0 && errno != EAGAIN && errno != EINTR) {
                 logf_("write uinput: %s", strerror(errno));
                 return -1;
@@ -1012,6 +1219,7 @@ int main(int argc, char **argv) {
 
     for (int i = 0; i < MAX_CLIENTS; i++) g_clients[i].fd = g_clients[i].sniff_fd = -1;
 
+    load_maps();
     // Priority list: -s wins, else the saved list, else the Retroid's own controls.
     if (!cli_source && load_config() > 0) logf_("loaded %d priority entries from %s", g_nprio, CONFIG_PATH);
     if (g_nprio == 0) {

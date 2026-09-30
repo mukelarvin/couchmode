@@ -83,7 +83,7 @@ fun AddControllerScreen(
                 }
                 available.forEachIndexed { index, device ->
                     if (index > 0) HorizontalDivider()
-                    DeviceRow(device, added = false, modifier = Modifier.clickable { onPick(device) })
+                    DeviceRow(device, added = false, title = labelFor(device.name, device.nameKey(), state.userNames), modifier = Modifier.clickable { onPick(device) })
                 }
                 if (alreadyAdded.isNotEmpty()) {
                     if (available.isNotEmpty()) HorizontalDivider()
@@ -95,7 +95,7 @@ fun AddControllerScreen(
                     )
                     alreadyAdded.forEachIndexed { index, device ->
                         if (index > 0) HorizontalDivider()
-                        DeviceRow(device, added = true)
+                        DeviceRow(device, added = true, title = labelFor(device.name, device.nameKey(), state.userNames))
                     }
                 }
             }
@@ -104,7 +104,7 @@ fun AddControllerScreen(
 }
 
 @Composable
-private fun DeviceRow(device: PadDevice, added: Boolean, modifier: Modifier = Modifier) {
+private fun DeviceRow(device: PadDevice, added: Boolean, title: String, modifier: Modifier = Modifier) {
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -113,7 +113,7 @@ private fun DeviceRow(device: PadDevice, added: Boolean, modifier: Modifier = Mo
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
-            Text(displayName(device.name), style = MaterialTheme.typography.bodyLarge)
+            Text(title, style = MaterialTheme.typography.bodyLarge)
             Text(
                 shortId(device.id) + if (device.uniq.isNotEmpty()) " / ${shortUniq(device.uniq)}" else "",
                 style = MaterialTheme.typography.bodySmall,
