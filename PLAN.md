@@ -72,6 +72,11 @@ one pad (the other stays a raw node), so the held pad had only a uniq-less copy.
   edit ("·" and "…" are now `·` / `…` escapes), and PLAN.md had 8 stray
   cp1252 bytes (em dashes) that showed as garbage on GitHub. When scripting edits on
   this machine always pass `encoding='utf-8'` to `open()` (Python's default here is cp1252).
+- Follow-up bug (Luke caught it): list rows and "remove" identified an entry by name + id,
+  which two identical pads share, so they dragged together and Remove would delete both.
+  Identity is now `PriorityEntry.identity()` = name|id|uniq everywhere. Verified with
+  `adb shell input swipe`: top down, bottom to top, middle down, middle up all give the
+  expected order with the two identical pads.
 - Caveat: entries saved before this (name only) still match any pad of that name.
   Friendly per-pad names (rename) are not built; rows show the address tail.
 

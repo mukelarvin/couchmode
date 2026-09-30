@@ -123,13 +123,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun removeFromPriority(entry: PriorityEntry) =
-        setPriority(state.value.priority.filterNot { it.name == entry.name && it.id == entry.id })
+        setPriority(state.value.priority.filterNot { it.identity() == entry.identity() })
 
     companion object {
         const val MAX_PRIORITY = 8
         private const val KEY_RETROID_COMPAT = "retroid_compat"
     }
 }
+
+/**
+ * What makes a priority entry "the same entry": name, id AND uniq. Two identical pads share name and
+ * id, so leaving the uniq out makes them collide (they drag together and "remove" deletes both).
+ */
+fun PriorityEntry.identity() = "$name|$id|$uniq"
 
 fun PriorityEntry.matches(device: PadDevice) =
     name == device.name && (id.isEmpty() || id == device.id) && (uniq.isEmpty() || uniq == device.uniq)

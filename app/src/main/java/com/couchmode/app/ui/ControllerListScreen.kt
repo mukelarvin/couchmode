@@ -62,8 +62,6 @@ import kotlinx.coroutines.launch
 
 private val ConnectedGreen = Color(0xFF2E9E44)
 
-private fun PriorityEntry.key() = "$name|$id"
-
 /** Home screen: the priority list of controllers (topmost connected one is used). */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -210,7 +208,7 @@ private fun PriorityList(
     }
 
     order.forEachIndexed { index, entry ->
-        val key = entry.key()
+        val key = entry.identity()
         // Keyed so a row keeps its identity (and its drag gesture) when it changes position.
         key(key) {
             val slide = remember { Animatable(0f) }
@@ -238,7 +236,7 @@ private fun PriorityList(
                             onDragEnd = {
                                 dragKey = null
                                 dragOffset = 0f
-                                if (order.map { it.key() } != latestEntries.map { it.key() }) latestOnReorder(order)
+                                if (order.map { it.identity() } != latestEntries.map { it.identity() }) latestOnReorder(order)
                             },
                             onDragCancel = {
                                 dragKey = null
@@ -248,18 +246,18 @@ private fun PriorityList(
                             onDrag = { change, amount ->
                                 change.consume()
                                 dragOffset += amount.y
-                                val i = order.indexOfFirst { it.key() == key }
+                                val i = order.indexOfFirst { it.identity() == key }
                                 // Swap with a neighbour once the dragged row is more than half over it.
                                 val neighbour = if (dragOffset > 0) i + 1 else i - 1
                                 val other = order.getOrNull(neighbour) ?: return@detectDragGestures
-                                val h = (heights[other.key()] ?: 0).toFloat()
+                                val h = (heights[other.identity()] ?: 0).toFloat()
                                 if (kotlin.math.abs(dragOffset) > h / 2f) {
                                     val down = dragOffset > 0
                                     order = order.toMutableList().also { java.util.Collections.swap(it, i, neighbour) }
                                     dragOffset += if (down) -h else h
                                     // The displaced row moved by our height; start it there and slide into place.
                                     val hd = (heights[key] ?: 0).toFloat()
-                                    slides[other.key()]?.let { a ->
+                                    slides[other.identity()]?.let { a ->
                                         scope.launch {
                                             a.snapTo(if (down) hd else -hd)
                                             a.animateTo(0f, tween(150))
