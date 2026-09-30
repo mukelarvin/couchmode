@@ -32,6 +32,7 @@ class MainViewModel : ViewModel() {
 
     // A reorder shown immediately, until the daemon's own list catches up.
     private val optimisticPriority = MutableStateFlow<List<PriorityEntry>?>(null)
+    private var saveSeq = 0  // so only the latest save's timer clears the override
 
     private val polled: StateFlow<ControllersState> = flow {
         while (true) {
@@ -65,12 +66,13 @@ class MainViewModel : ViewModel() {
     /** Saves a new priority list (highest first). The daemon persists it and switches sources. */
     fun setPriority(entries: List<PriorityEntry>) {
         optimisticPriority.value = entries
+        val seq = ++saveSeq
         viewModelScope.launch {
             runCatching { DaemonClient.setPriority(entries) }
             refreshNow.tryEmit(Unit)
             // Give the next poll time to return the saved list, then stop overriding.
             kotlinx.coroutines.delay(POLL_MS + 500)
-            optimisticPriority.value = null
+            if (seq == saveSeq) optimisticPriority.value = null
         }
     }
 

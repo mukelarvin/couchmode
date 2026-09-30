@@ -1,5 +1,8 @@
 package com.couchmode.app.ui
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationVector1D
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -31,12 +34,16 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,6 +56,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.couchmode.app.daemon.PriorityEntry
+import kotlinx.coroutines.launch
 
 private val ConnectedGreen = Color(0xFF2E9E44)
 
@@ -132,11 +140,18 @@ private fun PriorityList(
     onReorder: (List<PriorityEntry>) -> Unit,
     onRemove: (PriorityEntry) -> Unit,
 ) {
+    val scope = rememberCoroutineScope()
+    // The drag handlers below live as long as their row does, so they must read the
+    // latest list and callback through these, not through values captured at first draw.
+    val latestEntries by rememberUpdatedState(entries)
+    val latestOnReorder by rememberUpdatedState(onReorder)
     // The order shown while dragging; the saved list only changes when the drag ends.
     var order by remember { mutableStateOf(entries) }
     var dragKey by remember { mutableStateOf<String?>(null) }
     var dragOffset by remember { mutableFloatStateOf(0f) }
     val heights = remember { mutableStateMapOf<String, Int>() }
+    // Per-row slide animation for the row that gets displaced by a swap.
+    val slides = remember { mutableMapOf<String, Animatable<Float, AnimationVector1D>>() }
     LaunchedEffect(entries) { if (dragKey == null) order = entries }
 
     if (order.isEmpty()) {
@@ -150,48 +165,73 @@ private fun PriorityList(
 
     order.forEachIndexed { index, entry ->
         val key = entry.key()
-        val dragging = key == dragKey
-        if (index > 0) HorizontalDivider()
-        ControllerRow(
-            rank = index + 1,
-            entry = entry,
-            modifier = Modifier
-                .onSizeChanged { heights[key] = it.height }
-                .zIndex(if (dragging) 1f else 0f)
-                .graphicsLayer { translationY = if (dragging) dragOffset else 0f },
-            onRemove = { onRemove(entry) },
-            dragHandle = Modifier.pointerInput(key) {
-                detectDragGestures(
-                    onDragStart = {
-                        dragKey = key
-                        dragOffset = 0f
-                    },
-                    onDragEnd = {
-                        dragKey = null
-                        dragOffset = 0f
-                        if (order.map { it.key() } != entries.map { it.key() }) onReorder(order)
-                    },
-                    onDragCancel = {
-                        dragKey = null
-                        dragOffset = 0f
-                        order = entries
-                    },
-                    onDrag = { change, amount ->
-                        change.consume()
-                        dragOffset += amount.y
-                        val i = order.indexOfFirst { it.key() == key }
-                        // Swap with a neighbour once the dragged row is more than half over it.
-                        val neighbour = if (dragOffset > 0) i + 1 else i - 1
-                        val other = order.getOrNull(neighbour) ?: return@detectDragGestures
-                        val h = (heights[other.key()] ?: 0).toFloat()
-                        if (kotlin.math.abs(dragOffset) > h / 2f) {
-                            order = order.toMutableList().also { java.util.Collections.swap(it, i, neighbour) }
-                            dragOffset += if (dragOffset > 0) -h else h
+        // Keyed so a row keeps its identity (and its drag gesture) when it changes position.
+        key(key) {
+            val slide = remember { Animatable(0f) }
+            DisposableEffect(Unit) {
+                slides[key] = slide
+                onDispose { slides.remove(key) }
+            }
+            val dragging = key == dragKey
+            if (index > 0) HorizontalDivider()
+            ControllerRow(
+                rank = index + 1,
+                entry = entry,
+                modifier = Modifier
+                    .onSizeChanged { heights[key] = it.height }
+                    .zIndex(if (dragging) 1f else 0f)
+                    .graphicsLayer { translationY = if (dragging) dragOffset else slide.value },
+                onRemove = { onRemove(entry) },
+                dragHandle = Modifier.pointerInput(Unit) {
+                    try {
+                        detectDragGestures(
+                            onDragStart = {
+                                dragKey = key
+                                dragOffset = 0f
+                            },
+                            onDragEnd = {
+                                dragKey = null
+                                dragOffset = 0f
+                                if (order.map { it.key() } != latestEntries.map { it.key() }) latestOnReorder(order)
+                            },
+                            onDragCancel = {
+                                dragKey = null
+                                dragOffset = 0f
+                                order = latestEntries
+                            },
+                            onDrag = { change, amount ->
+                                change.consume()
+                                dragOffset += amount.y
+                                val i = order.indexOfFirst { it.key() == key }
+                                // Swap with a neighbour once the dragged row is more than half over it.
+                                val neighbour = if (dragOffset > 0) i + 1 else i - 1
+                                val other = order.getOrNull(neighbour) ?: return@detectDragGestures
+                                val h = (heights[other.key()] ?: 0).toFloat()
+                                if (kotlin.math.abs(dragOffset) > h / 2f) {
+                                    val down = dragOffset > 0
+                                    order = order.toMutableList().also { java.util.Collections.swap(it, i, neighbour) }
+                                    dragOffset += if (down) -h else h
+                                    // The displaced row moved by our height; start it there and slide into place.
+                                    val hd = (heights[key] ?: 0).toFloat()
+                                    slides[other.key()]?.let { a ->
+                                        scope.launch {
+                                            a.snapTo(if (down) hd else -hd)
+                                            a.animateTo(0f, tween(150))
+                                        }
+                                    }
+                                }
+                            },
+                        )
+                    } finally {
+                        // Never leave the list stuck in "dragging" if the gesture is torn down.
+                        if (dragKey == key) {
+                            dragKey = null
+                            dragOffset = 0f
                         }
-                    },
-                )
-            },
-        )
+                    }
+                },
+            )
+        }
     }
 }
 
