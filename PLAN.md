@@ -49,6 +49,28 @@ just status + resume points, not the design doc.
 
 ## Session log
 
+### 2026-09-30 (b) — RsMapping has a device blacklist we can probably use instead of the decoy
+
+Read from the APK's dex (dexdump), not yet exercised on the device:
+- `AppMapping.isShouldHold(name)` = NOT `RsDeviceManage.isInBlackList(name)`: the
+  only Java-side test for "adopt this device" is a name blacklist stored in the
+  RsMapping app's SharedPreferences (key `hold_devices_black_list`, JSON list of
+  names). A blacklisted device is not held: no copy, node not hidden.
+- RsMapping exports a bindable service: action `com.ro.mapping.action.MAPPING_SERVICE`,
+  `com.ro.mapping.service.ApiService`, exported=true, no permission seen. AIDL
+  descriptor `com.ro.mapping.sdk.IServerApi`. Transactions (code: method):
+  37 `M()` -> List<String> (get blacklist), 38 `N(int op, String name)` (op 1 =
+  add to blacklist, anything else = remove; returns void). Parcel: enforce
+  interface, writeInt(op), writeString(name). Obfuscated names (n0.a), so a
+  firmware update may renumber them.
+- Plan: bind that service from the app and blacklist "CouchMode Virtual Gamepad"
+  (and stop creating the decoy when it worked); keep the decoy as a fallback only
+  if the call fails. Needs `<queries>` for package visibility. Changes a
+  persistent setting inside Retroid's app (reversible with op 0); ask Luke
+  before writing. Reading the list (37) is harmless and is the first test.
+- Also: `ApiService` methods include config/trigger/mode getters and setters we
+  have not read; the same service may let us read trigger mode etc.
+
 ### 2026-09-30 — multi-source priority (Claude Code)
 
 - Daemon: priority list (up to 8 name + `bus:vendor:product:version` entries).
