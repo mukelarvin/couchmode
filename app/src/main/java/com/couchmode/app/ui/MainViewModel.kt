@@ -116,10 +116,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun addToPriority(device: PadDevice) {
         val current = state.value.priority
         if (current.any { it.matches(device) } || current.size >= MAX_PRIORITY) return
-        // A vendor copy's ID is not the pad's own; store "any id" so the entry keeps matching
-        // the real pad if the service later releases it.
+        // The daemon reports a held pad under its own identity. If it only has the Retroid
+        // service's copy to go on, drop the copy's ID so the entry keeps matching the real pad.
         val id = if (isVendorCopy(device.id)) "" else device.id
-        setPriority(current + PriorityEntry(device.name, id, connected = true, active = false))
+        setPriority(current + PriorityEntry(device.name, id, device.uniq, connected = true, active = false))
     }
 
     fun removeFromPriority(entry: PriorityEntry) =
@@ -131,4 +131,5 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 }
 
-fun PriorityEntry.matches(device: PadDevice) = name == device.name && (id.isEmpty() || id == device.id)
+fun PriorityEntry.matches(device: PadDevice) =
+    name == device.name && (id.isEmpty() || id == device.id) && (uniq.isEmpty() || uniq == device.uniq)

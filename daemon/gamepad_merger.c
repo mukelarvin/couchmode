@@ -11,17 +11,19 @@
 // line-based text protocol, one request per line:
 //
 //   PING                  -> PONG
-//   STATUS                -> S<TAB>activeOrTopName<TAB>attached(0/1)<TAB>virtual<TAB>id<TAB>decoy(0/1)
-//   LIST                  -> D<TAB>name<TAB>bus:vendor:product:version<TAB>isSource(0/1)
+//   STATUS                -> S<TAB>activeOrTopName<TAB>attached(0/1)<TAB>virtual<TAB>id<TAB>decoy(0/1)<TAB>uniq
+//   LIST                  -> D<TAB>name<TAB>bus:vendor:product:version<TAB>isSource(0/1)<TAB>uniq
 //                            ... then END       (gamepad-looking devices only)
-//   PRIORITY[<TAB>name<TAB>id]... -> OK   replace the priority list (up to 8 name/id
-//                            pairs, highest first). id is "bus:vendor:product:version"
-//                            (hex) and disambiguates devices that share a name (e.g. a
-//                            pad and the vendor's virtual copy); empty = match any.
-//   GETPRIO               -> P<TAB>name<TAB>id<TAB>connected(0/1)<TAB>active(0/1)
+//   PRIORITY[<TAB>name<TAB>id<TAB>uniq]... -> OK   replace the priority list (up to 8
+//                            name/id/uniq triples, highest first). id is
+//                            "bus:vendor:product:version" (hex); uniq is the device's unique
+//                            string (the Bluetooth address for a BT pad). Each is empty = match
+//                            any. id and uniq tell same-named devices apart: a pad and the
+//                            vendor's copy of it, or two identical pads.
+//   GETPRIO               -> P<TAB>name<TAB>id<TAB>uniq<TAB>connected(0/1)<TAB>active(0/1)
 //                            ... then END
-//   SOURCE <name>[<TAB>id] -> OK    shorthand for a one-entry PRIORITY
-//   SNIFF <name>[<TAB>id] -> OK|ERR ...  then "E type code value" lines for
+//   SOURCE <name>[<TAB>id[<TAB>uniq]] -> OK    shorthand for a one-entry PRIORITY
+//   SNIFF <name>[<TAB>id[<TAB>uniq]] -> OK|ERR ...  then "E type code value" lines for
 //                            every EV_KEY/EV_ABS event; "GONE" if the device
 //                            disappears or (for the active source) we switch away. Works on the current source too (a
 //                            grabbed device can't be opened twice, so we tap
@@ -83,12 +85,14 @@ static int g_allowed_uid = -1;     // -u; -1 = accept any client
 struct prio_entry {
     char name[NAME_LEN];
     char id[32];  // "bus:vendor:product:version" (hex) to tell same-named devices apart; "" = any
+    char uniq[40];  // e.g. the Bluetooth address; tells identical pads apart; "" = any
 };
 static struct prio_entry g_prio[MAX_PRIO];
 static int g_nprio = 0;
 static int g_active = -1;          // index into g_prio of the attached source, or -1
 static char g_active_name[NAME_LEN];  // the attached device's real name and id
 static char g_active_id[32];
+static char g_active_uniq[40];
 // Everything the virtual device declares, so we can release it all when switching sources.
 static int g_keys[KEY_MAX + 1], g_nkeys = 0;
 static int g_axes[ABS_MAX + 1], g_naxes = 0;
@@ -174,12 +178,83 @@ static int is_vendor_copy_id(const char *id) {
     return strncmp(id, "0003:2022:3001:", 15) == 0 && strcmp(id + 15, "0000") != 0;
 }
 
+// Devices the kernel knows, from /proc/bus/input/devices. Unlike /dev/input this still
+// lists a pad whose node the Retroid service has hidden, and it shows the pad's uniq.
+struct kdev {
+    char name[NAME_LEN];
+    char id[32];
+    char uniq[40];
+    int event;  // N of /dev/input/eventN, or -1
+};
+
+static int read_kdevs(struct kdev *out, int max) {
+    FILE *f = fopen("/proc/bus/input/devices", "r");
+    if (!f) return 0;
+    char line[512];
+    int n = 0, have = 0;
+    struct kdev cur;
+    memset(&cur, 0, sizeof(cur));
+    cur.event = -1;
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        if (line[0] == 0) {  // blank line ends a device block
+            if (have && n < max) out[n++] = cur;
+            memset(&cur, 0, sizeof(cur));
+            cur.event = -1;
+            have = 0;
+        } else if (strncmp(line, "I: ", 3) == 0) {
+            unsigned b, v, p, r;
+            if (sscanf(line, "I: Bus=%x Vendor=%x Product=%x Version=%x", &b, &v, &p, &r) == 4) {
+                snprintf(cur.id, sizeof(cur.id), "%04x:%04x:%04x:%04x", b, v, p, r);
+                have = 1;
+            }
+        } else if (strncmp(line, "N: Name=\"", 9) == 0) {
+            char *q = line + 9;
+            size_t l = strlen(q);
+            if (l && q[l - 1] == '"') q[l - 1] = 0;
+            snprintf(cur.name, sizeof(cur.name), "%s", q);
+        } else if (strncmp(line, "U: Uniq=", 8) == 0) {
+            snprintf(cur.uniq, sizeof(cur.uniq), "%s", line + 8);
+        } else if (strncmp(line, "H: Handlers=", 12) == 0) {
+            const char *e = strstr(line, "event");
+            if (e) cur.event = atoi(e + 5);
+        }
+    }
+    if (have && n < max) out[n++] = cur;
+    fclose(f);
+    return n;
+}
+
+// A real (non-copy) device called `name` (with this `uniq`, if given) that the kernel has
+// but whose /dev/input node is hidden: the Retroid service is holding it and only its
+// copy is usable. Fills `res` and returns 1 if found.
+static int find_held_raw(const char *name, const char *uniq, struct kdev *res) {
+    struct kdev k[64];
+    int n = read_kdevs(k, 64);
+    for (int i = 0; i < n; i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "/dev/input/event%d", k[i].event);
+        if (strcmp(k[i].name, name) == 0 && !is_vendor_copy_id(k[i].id) && k[i].event >= 0 &&
+            access(path, F_OK) != 0 && (uniq[0] == 0 || strcmp(k[i].uniq, uniq) == 0)) {
+            *res = k[i];
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void read_uniq(int fd, char *out, size_t n) {
+    out[0] = 0;
+    if (ioctl(fd, EVIOCGUNIQ(n - 1), out) < 0) out[0] = 0;
+    out[n - 1] = 0;
+}
+
 // Opens the first /dev/input/event* whose EVIOCGNAME equals `name` (and, if
 // `id` is non-empty, whose bus:vendor:product:version matches). If the wanted
 // device isn't there but the vendor's copy of a pad with that name is, returns the
 // copy instead, so a pad keeps working whether or not the service is holding it.
 // With an empty `id`, the real device is preferred over its copy. Returns fd or -1.
-static int open_by_name(const char *name, const char *id) {
+static int open_by_name(const char *name, const char *id, const char *uniq) {
     DIR *d = opendir("/dev/input");
     if (!d) {
         logf_("opendir /dev/input: %s", strerror(errno));
@@ -196,14 +271,21 @@ static int open_by_name(const char *name, const char *id) {
         char devname[NAME_LEN] = {0};
         struct input_id iid;
         char idstr[32] = "";
+        char duniq[40];
         if (ioctl(fd, EVIOCGID, &iid) == 0) format_id(&iid, idstr, sizeof(idstr));
+        read_uniq(fd, duniq, sizeof(duniq));
         if (ioctl(fd, EVIOCGNAME(sizeof(devname) - 1), devname) >= 0 && strcmp(devname, name) == 0) {
-            int exact = id[0] == 0 ? !is_vendor_copy_id(idstr) : strcmp(id, idstr) == 0;
+            int exact = (id[0] == 0 ? !is_vendor_copy_id(idstr) : strcmp(id, idstr) == 0) &&
+                        (uniq[0] == 0 || strcmp(uniq, duniq) == 0);
             if (exact) {
                 found = fd;
                 break;
             }
-            if (copy < 0 && is_vendor_copy_id(idstr) && !is_vendor_copy_id(id)) {
+            // The vendor's copy has no uniq of its own. It stands in for a wanted pad only if
+            // that pad really is the one the service is holding.
+            struct kdev held;
+            if (copy < 0 && is_vendor_copy_id(idstr) && !is_vendor_copy_id(id) &&
+                (uniq[0] == 0 || find_held_raw(name, uniq, &held))) {
                 copy = fd;  // remember as a fallback; keep looking for the real one
                 continue;
             }
@@ -396,7 +478,7 @@ static void save_config(void) {
         return;
     }
     fprintf(f, "@decoy\t%d\n", g_use_decoy);
-    for (int i = 0; i < g_nprio; i++) fprintf(f, "%s\t%s\n", g_prio[i].name, g_prio[i].id);
+    for (int i = 0; i < g_nprio; i++) fprintf(f, "%s\t%s\t%s\n", g_prio[i].name, g_prio[i].id, g_prio[i].uniq);
     fchmod(fileno(f), 0666);  // the daemon may run as root or shell across restarts
     fclose(f);
 }
@@ -414,14 +496,20 @@ static int load_config(void) {
             continue;
         }
         char *tab = strchr(line, '\t');
-        char *id = "";
+        char *id = "", *uniq = "";
         if (tab) {
             *tab = 0;
             id = tab + 1;
+            char *tab2 = strchr(id, '\t');
+            if (tab2) {
+                *tab2 = 0;
+                uniq = tab2 + 1;
+            }
         }
         if (line[0] == 0) continue;
         snprintf(g_prio[g_nprio].name, NAME_LEN, "%s", line);
         snprintf(g_prio[g_nprio].id, sizeof(g_prio[0].id), "%s", id);
+        snprintf(g_prio[g_nprio].uniq, sizeof(g_prio[0].uniq), "%s", uniq);
         g_nprio++;
     }
     fclose(f);
@@ -464,36 +552,48 @@ static void send_event_line(struct client *c, const struct input_event *ev) {
     if (send_str(c->fd, line) < 0) drop_client(c);
 }
 
-// Splits "name<TAB>id" in place; returns the id ("" if absent).
-static char *split_id(char *arg) {
-    char *tab = strchr(arg, '\t');
-    if (!tab) return arg + strlen(arg);
-    *tab = 0;
-    return tab + 1;
+// Splits "a<TAB>b<TAB>c" in place into up to 3 fields; missing ones are "".
+static void split3(char *arg, char **a, char **b, char **c) {
+    *a = arg;
+    *b = *c = arg + strlen(arg);
+    char *t1 = strchr(arg, '\t');
+    if (!t1) return;
+    *t1 = 0;
+    *b = t1 + 1;
+    char *t2 = strchr(*b, '\t');
+    if (!t2) return;
+    *t2 = 0;
+    *c = t2 + 1;
 }
 
-// True if this name/id is the device we are currently forwarding from.
-static int is_source(const char *name, const char *id) {
-    return g_src >= 0 && strcmp(name, g_active_name) == 0 && (id[0] == 0 || strcmp(id, g_active_id) == 0);
+static int entry_matches(const struct prio_entry *e, const char *name, const char *id, const char *uniq) {
+    return strcmp(e->name, name) == 0 && (e->id[0] == 0 || strcmp(e->id, id) == 0) &&
+           (e->uniq[0] == 0 || strcmp(e->uniq, uniq) == 0);
+}
+
+// True if this name/id/uniq is the device we are currently forwarding from.
+static int is_source(const char *name, const char *id, const char *uniq) {
+    return g_src >= 0 && strcmp(name, g_active_name) == 0 && (id[0] == 0 || strcmp(id, g_active_id) == 0) &&
+           (uniq[0] == 0 || strcmp(uniq, g_active_uniq) == 0);
 }
 
 static void detach_source(void);
 static int check_priority(void);
 static void recreate_virtual(void);
 
-// Replaces the priority list with the given (name, id) pairs, saves it, and re-evaluates.
+// Replaces the priority list with the given (name, id, uniq) triples, saves it, and re-evaluates.
 static void set_priority(char **f, int n) {
     g_nprio = n;
     for (int i = 0; i < n; i++) {
-        snprintf(g_prio[i].name, NAME_LEN, "%s", f[2 * i]);
-        snprintf(g_prio[i].id, sizeof(g_prio[0].id), "%s", f[2 * i + 1]);
+        snprintf(g_prio[i].name, NAME_LEN, "%s", f[3 * i]);
+        snprintf(g_prio[i].id, sizeof(g_prio[0].id), "%s", f[3 * i + 1]);
+        snprintf(g_prio[i].uniq, sizeof(g_prio[0].uniq), "%s", f[3 * i + 2]);
     }
     save_config();
     if (g_src >= 0) {
         int found = -1;  // is the attached device still in the list, and where?
         for (int i = 0; i < g_nprio; i++)
-            if (strcmp(g_prio[i].name, g_active_name) == 0 &&
-                (g_prio[i].id[0] == 0 || strcmp(g_prio[i].id, g_active_id) == 0)) {
+            if (entry_matches(&g_prio[i], g_active_name, g_active_id, g_active_uniq)) {
                 found = i;
                 break;
             }
@@ -510,8 +610,9 @@ static void handle_line(struct client *c, char *line) {
         char out[NAME_LEN * 2 + 32];
         const char *name = g_src >= 0 ? g_active_name : (g_nprio > 0 ? g_prio[0].name : "");
         const char *id = g_src >= 0 ? g_active_id : (g_nprio > 0 ? g_prio[0].id : "");
-        snprintf(out, sizeof(out), "S\t%s\t%d\t%s\t%s\t%d\n", name, g_src >= 0, g_virtual_name, id,
-                 g_decoy >= 0);
+        const char *uniq = g_src >= 0 ? g_active_uniq : (g_nprio > 0 ? g_prio[0].uniq : "");
+        snprintf(out, sizeof(out), "S\t%s\t%d\t%s\t%s\t%d\t%s\n", name, g_src >= 0, g_virtual_name, id,
+                 g_decoy >= 0, uniq);
         send_str(c->fd, out);
     } else if (strcmp(line, "LIST") == 0) {
         DIR *d = opendir("/dev/input");
@@ -528,10 +629,18 @@ static void handle_line(struct client *c, char *line) {
                 ioctl(fd, EVIOCGID, &id) >= 0 && strcmp(name, g_virtual_name) != 0 &&
                 strcmp(name, DECOY_NAME) != 0 &&
                 looks_like_gamepad(fd)) {
-                char out[NAME_LEN + 64];
-                char idstr[32];
+                char out[NAME_LEN + 128];
+                char idstr[32], duniq[40];
                 format_id(&id, idstr, sizeof(idstr));
-                snprintf(out, sizeof(out), "D\t%s\t%s\t%d\n", name, idstr, is_source(name, idstr));
+                read_uniq(fd, duniq, sizeof(duniq));
+                // The vendor's copy of a held pad is listed as the pad itself (its real ID and
+                // uniq), so a pad looks the same to the app whether or not it is being held.
+                struct kdev held;
+                if (is_vendor_copy_id(idstr) && find_held_raw(name, "", &held)) {
+                    snprintf(idstr, sizeof(idstr), "%s", held.id);
+                    snprintf(duniq, sizeof(duniq), "%s", held.uniq);
+                }
+                snprintf(out, sizeof(out), "D\t%s\t%s\t%d\t%s\n", name, idstr, is_source(name, idstr, duniq), duniq);
                 send_str(c->fd, out);
             }
             close(fd);
@@ -539,32 +648,32 @@ static void handle_line(struct client *c, char *line) {
         if (d) closedir(d);
         send_str(c->fd, "END\n");
     } else if (strncmp(line, "SOURCE ", 7) == 0) {
-        char *id = split_id(line + 7);
-        char *one[2] = {line + 7, id};
-        logf_("source set to \"%s\" [%s]", one[0], one[1]);
+        char *one[3];
+        split3(line + 7, &one[0], &one[1], &one[2]);
+        logf_("source set to \"%s\" [%s] [%s]", one[0], one[1], one[2]);
         set_priority(one, 1);
         send_str(c->fd, "OK\n");
     } else if (strncmp(line, "PRIORITY", 8) == 0 && (line[8] == 0 || line[8] == '\t')) {
-        char *f[2 * MAX_PRIO];
+        char *f[3 * MAX_PRIO];
         int nf = 0;
         char *p = line + 8;
-        while (*p == '\t' && nf < 2 * MAX_PRIO) {
+        while (*p == '\t' && nf < 3 * MAX_PRIO) {
             *p++ = 0;
             f[nf++] = p;
             while (*p && *p != '\t') p++;
         }
-        if (nf % 2 != 0 || *p != 0) {
+        if (nf % 3 != 0 || *p != 0) {
             send_str(c->fd, "ERR badlist\n");
         } else {
-            logf_("priority list set (%d entries)", nf / 2);
-            set_priority(f, nf / 2);
+            logf_("priority list set (%d entries)", nf / 3);
+            set_priority(f, nf / 3);
             send_str(c->fd, "OK\n");
         }
     } else if (strcmp(line, "GETPRIO") == 0) {
         for (int i = 0; i < g_nprio; i++) {
-            int fd = open_by_name(g_prio[i].name, g_prio[i].id);
-            char out[NAME_LEN + 96];
-            snprintf(out, sizeof(out), "P\t%s\t%s\t%d\t%d\n", g_prio[i].name, g_prio[i].id,
+            int fd = open_by_name(g_prio[i].name, g_prio[i].id, g_prio[i].uniq);
+            char out[NAME_LEN + 128];
+            snprintf(out, sizeof(out), "P\t%s\t%s\t%s\t%d\t%d\n", g_prio[i].name, g_prio[i].id, g_prio[i].uniq,
                      fd >= 0 || i == g_active, i == g_active && g_src >= 0);
             if (fd >= 0) close(fd);
             send_str(c->fd, out);
@@ -572,12 +681,12 @@ static void handle_line(struct client *c, char *line) {
         send_str(c->fd, "END\n");
     } else if (strncmp(line, "SNIFF ", 6) == 0) {
         stop_sniff(c);
-        const char *name = line + 6;
-        const char *id = split_id(line + 6);
-        if (is_source(name, id)) {
+        char *name, *id, *uniq;
+        split3(line + 6, &name, &id, &uniq);
+        if (is_source(name, id, uniq)) {
             c->sniff_source = 1;
             send_str(c->fd, "OK\n");
-        } else if ((c->sniff_fd = open_by_name(name, id)) >= 0) {
+        } else if ((c->sniff_fd = open_by_name(name, id, uniq)) >= 0) {
             send_str(c->fd, "OK\n");
         } else {
             send_str(c->fd, "ERR notfound\n");
@@ -707,13 +816,20 @@ static void detach_source(void) {
 // Opens, configures and grabs priority entry `idx`. Creates the virtual device
 // on first success. Returns -1 only on a fatal (virtual device) error.
 static int attach_entry(int idx) {
-    int src = open_by_name(g_prio[idx].name, g_prio[idx].id);
+    int src = open_by_name(g_prio[idx].name, g_prio[idx].id, g_prio[idx].uniq);
     if (src < 0) return 0;  // not present; caller retries later
     snprintf(g_active_name, sizeof(g_active_name), "%s", g_prio[idx].name);
     g_active_id[0] = 0;
     struct input_id iid;
     if (ioctl(src, EVIOCGID, &iid) == 0) format_id(&iid, g_active_id, sizeof(g_active_id));
-    logf_("source #%d: \"%s\" [%s]", idx, g_active_name, g_active_id);
+    read_uniq(src, g_active_uniq, sizeof(g_active_uniq));
+    // If we attached the vendor's copy of a held pad, record the pad's own identity.
+    struct kdev held;
+    if (is_vendor_copy_id(g_active_id) && find_held_raw(g_active_name, g_prio[idx].uniq, &held)) {
+        snprintf(g_active_id, sizeof(g_active_id), "%s", held.id);
+        snprintf(g_active_uniq, sizeof(g_active_uniq), "%s", held.uniq);
+    }
+    logf_("source #%d: \"%s\" [%s] [%s]", idx, g_active_name, g_active_id, g_active_uniq);
     if (g_ui < 0) {
         g_ui = create_virtual_from(src, g_virtual_name);
         if (g_ui < 0) {
@@ -765,7 +881,7 @@ static int attach_entry(int idx) {
 static int check_priority(void) {
     int limit = g_src >= 0 ? g_active : g_nprio;
     for (int i = 0; i < limit; i++) {
-        int fd = open_by_name(g_prio[i].name, g_prio[i].id);
+        int fd = open_by_name(g_prio[i].name, g_prio[i].id, g_prio[i].uniq);
         if (fd < 0) continue;
         close(fd);
         detach_source();

@@ -148,7 +148,7 @@ private fun RetroidCompatCard(compat: CompatState, onSet: (Boolean) -> Unit) {
             )
             Text(
                 when {
-                    compat.busy -> "Applying…"
+                    compat.busy -> "Applying\u2026"
                     compat.mode == CompatMode.IGNORE_LIST ->
                         "Active: Retroid's input service has been told to ignore CouchMode's virtual controller."
                     compat.mode == CompatMode.DECOY ->
@@ -331,7 +331,7 @@ private fun ControllerRow(
                     entry.active -> "In use"
                     entry.connected -> "Connected"
                     else -> "Not connected"
-                },
+                } + if (entry.uniq.isNotEmpty()) " \u00b7 ${shortUniq(entry.uniq)}" else "",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

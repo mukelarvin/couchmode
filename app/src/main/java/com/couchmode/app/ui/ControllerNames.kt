@@ -16,3 +16,6 @@ fun shortId(id: String): String = id.split(':').let { if (it.size == 4) "${it[1]
  * picker; the real pad is listed separately. See PLAN.md (2026-09-29 f/g).
  */
 fun isVendorCopy(id: String): Boolean = id.startsWith("0003:2022:3001:") && !id.endsWith(":0000")
+
+/** The tail of a unique string such as a Bluetooth address ("E4:17:D8:78:71:73" -> "71:73"); "" if none. */
+fun shortUniq(uniq: String): String = if (uniq.length >= 5) uniq.takeLast(5) else uniq

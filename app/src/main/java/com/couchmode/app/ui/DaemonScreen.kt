@@ -177,7 +177,7 @@ fun DaemonScreen(modifier: Modifier = Modifier) {
 
         Text("Controllers present")
         devices.forEach { device ->
-            val inList = priority.any { it.name == device.name && (it.id.isEmpty() || it.id == device.id) }
+            val inList = priority.any { it.matches(device) }
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(device.name + if (device.isSource) "  [in use]" else "")
                 Text(device.id)
@@ -187,7 +187,9 @@ fun DaemonScreen(modifier: Modifier = Modifier) {
                     }
                     OutlinedButton(
                         enabled = !inList && priority.size < 8,
-                        onClick = { savePriority(priority + PriorityEntry(device.name, device.id, true, false)) },
+                        onClick = {
+                            savePriority(priority + PriorityEntry(device.name, device.id, device.uniq, true, false))
+                        },
                     ) { Text(if (inList) "In priority list" else "Add to priority") }
                 }
             }

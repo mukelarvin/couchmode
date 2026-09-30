@@ -115,7 +115,7 @@ private fun DeviceRow(device: PadDevice, added: Boolean, modifier: Modifier = Mo
         Column(Modifier.weight(1f)) {
             Text(displayName(device.name), style = MaterialTheme.typography.bodyLarge)
             Text(
-                shortId(device.id),
+                shortId(device.id) + if (device.uniq.isNotEmpty()) " / ${shortUniq(device.uniq)}" else "",
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

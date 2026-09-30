@@ -12,7 +12,12 @@ import java.io.IOException
 import java.io.InputStreamReader
 import kotlin.concurrent.thread
 
-data class PadDevice(val name: String, val id: String, val isSource: Boolean)
+/**
+ * A controller the daemon can see. [id] is bus:vendor:product:version; [uniq] is the device's unique
+ * string (the Bluetooth address for a BT pad, empty for built-in or virtual devices). Name + id +
+ * uniq together tell apart two identical pads, and a pad from the Retroid service's copy of it.
+ */
+data class PadDevice(val name: String, val id: String, val isSource: Boolean, val uniq: String = "")
 
 data class DaemonStatus(
     val source: String,
@@ -23,7 +28,13 @@ data class DaemonStatus(
 )
 
 /** One row of the daemon's priority list, highest priority first. */
-data class PriorityEntry(val name: String, val id: String, val connected: Boolean, val active: Boolean)
+data class PriorityEntry(
+    val name: String,
+    val id: String,
+    val uniq: String,
+    val connected: Boolean,
+    val active: Boolean,
+)
 
 data class RawEvent(val type: Int, val code: Int, val value: Int)
 
@@ -84,19 +95,19 @@ object DaemonClient {
     suspend fun listDevices(): List<PadDevice> =
         request("LIST", terminator = "END").mapNotNull { line ->
             val f = line.split('\t')
-            if (f.size == 4 && f[0] == "D") PadDevice(f[1], f[2], f[3] == "1") else null
+            if (f.size >= 4 && f[0] == "D") PadDevice(f[1], f[2], f[3] == "1", f.getOrElse(4) { "" }) else null
         }
 
     /** Devices are identified by name plus id: a pad and the vendor's virtual copy can share a name. */
     suspend fun priority(): List<PriorityEntry> =
         request("GETPRIO", terminator = "END").mapNotNull { line ->
             val f = line.split('\t')
-            if (f.size == 5 && f[0] == "P") PriorityEntry(f[1], f[2], f[3] == "1", f[4] == "1") else null
+            if (f.size == 6 && f[0] == "P") PriorityEntry(f[1], f[2], f[3], f[4] == "1", f[5] == "1") else null
         }
 
     /** Replaces the daemon's priority list (highest first). The daemon saves it and switches sources as needed. */
     suspend fun setPriority(entries: List<PriorityEntry>) {
-        val command = "PRIORITY" + entries.joinToString("") { "\t${it.name}\t${it.id}" }
+        val command = "PRIORITY" + entries.joinToString("") { "\t${it.name}\t${it.id}\t${it.uniq}" }
         check(request(command).firstOrNull() == "OK") { "daemon rejected PRIORITY" }
     }
 
@@ -111,7 +122,7 @@ object DaemonClient {
     }
 
     suspend fun setSource(device: PadDevice) {
-        check(request("SOURCE ${device.name}\t${device.id}").firstOrNull() == "OK") { "daemon rejected SOURCE" }
+        check(request("SOURCE ${device.name}\t${device.id}\t${device.uniq}").firstOrNull() == "OK") { "daemon rejected SOURCE" }
     }
 
     /**
@@ -120,7 +131,7 @@ object DaemonClient {
      */
     fun sniff(device: PadDevice): Flow<RawEvent> = callbackFlow {
         val socket = connect(timeoutMs = 0)
-        socket.outputStream.write("SNIFF ${device.name}\t${device.id}\n".toByteArray())
+        socket.outputStream.write("SNIFF ${device.name}\t${device.id}\t${device.uniq}\n".toByteArray())
         val reader = BufferedReader(InputStreamReader(socket.inputStream))
         val worker = thread(name = "couchmode-sniff") {
             try {
