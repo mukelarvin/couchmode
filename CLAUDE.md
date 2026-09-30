@@ -129,3 +129,22 @@ Verified from `tools/root-probe.sh` v8 output:
    sees the new device.
 3. Then multi-source priority (Bluetooth pad appears/disappears), then the
    app-to-daemon channel, then Phase 4 UI, then the wizard.
+
+## Testing on the device: fake input is REAL input
+
+Anything that creates or drives an input device (uinput test pads, `adb shell input tap/swipe`)
+acts on Luke's real handheld. On 2026-09-30 fake controller presses were forwarded by the daemon to
+whatever was in front (home screen, an app's details page next to "Uninstall"), and Luke had to
+intervene. Rules:
+
+1. Before any test that emits fake button presses, take EXCLUSIVE control of the virtual
+   gamepad's output (EVIOCGRAB the `CouchMode Virtual Gamepad` node from the test reader, started
+   BEFORE the fake pad exists) so Android never sees the events. A fake pad that is the active
+   source is forwarded to apps unless a client has muted it.
+2. Before every `adb input tap/swipe`, check the focused window is CouchMode
+   (`dumpsys window | grep mCurrentFocus`) and abort otherwise. Coordinates are only valid for
+   the screen you expect.
+3. Tell Luke what a test will do and for how long before running it, unless the handheld is
+   clearly idle. Do not run input tests while they may be using it.
+4. Leave settings as found (Bluetooth, priority list, Retroid ignore list) and say so when you
+   change something temporarily.
