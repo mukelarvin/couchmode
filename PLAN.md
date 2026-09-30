@@ -74,6 +74,22 @@ just status + resume points, not the design doc.
   (e.g. `DECOY 0|1`, create/destroy at runtime) and a saved setting; the
   decoy is currently always created at daemon start. The flow must tolerate
   RsMapping already holding a real pad when the decoy is created.
+- **App UI, first pass (Phase 4), from `docs/concept/app-screens.png`:**
+  `ControllerListScreen` (priority list: drag handle, rank badge, status dot,
+  "In use / Connected / Not connected", remove, "Add controller"),
+  `AddControllerScreen` (present controllers not yet added, "Already added"
+  section, hides Retroid's re-mapped copies via `isVendorCopy`), and the old
+  developer screen behind the overflow menu ("Developer tools"). `MainViewModel`
+  polls the daemon every 2s only while a screen is visible. Builds and lints;
+  NOT yet seen running on the device (adb dropped). Friendly names: only
+  "Retroid Pocket Controller" -> "Onboard controls" so far; no rename UI yet.
+  Wizard (concept screen 3) not built. Open design question for Luke: the concept
+  shows a lettered "A" prompt, the spec says positional prompts + diagram.
+- Gap for raw (non-Retroid-copy) pads: the daemon forwards their codes as-is,
+  but many Linux pads report the right stick as ABS_RX/RY while our virtual
+  device (copied from the Retroid) uses ABS_Z/RZ, so the right stick and possibly
+  face buttons won't line up until canonical mapping exists.
+
 - Not done yet: canonical virtual layout + rumble, first-run flow, wizard,
   the face-button swap investigation (parked by Luke), root-menu launch test.
 
