@@ -37,10 +37,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.couchmode.app.daemon.EvdevNames
 import com.couchmode.app.wizard.Spot
 import com.couchmode.app.wizard.WIZARD_STEPS
 import com.couchmode.app.wizard.WizardState
+import com.couchmode.app.wizard.sourceLabel
 
 private val DoneGreen = Color(0xFF2E9E44)
 
@@ -61,6 +61,7 @@ fun WizardScreen(
     onClearSaved: () -> Unit,
     onStartTest: () -> Unit,
     onStopTest: () -> Unit,
+    onFinishNow: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Scaffold(
@@ -102,7 +103,7 @@ fun WizardScreen(
                 }
                 state.testing -> TestContent(state, onStopTest)
                 state.finished -> FinishedContent(state, onClose, onStartTest)
-                else -> StepContent(state, hasSavedMap, onSkip, onRetry, onBack, onClearSaved)
+                else -> StepContent(state, hasSavedMap, onSkip, onRetry, onBack, onClearSaved, onFinishNow)
             }
         }
     }
@@ -116,6 +117,7 @@ private fun StepContent(
     onRetry: () -> Unit,
     onBack: () -> Unit,
     onClearSaved: () -> Unit,
+    onFinishNow: () -> Unit,
 ) {
     val step = state.step
     ControllerDiagram(
@@ -147,7 +149,10 @@ private fun StepContent(
         OutlinedButton(onClick = onSkip, enabled = !state.justCaptured) { Text("Skip button") }
         OutlinedButton(onClick = onRetry) { Text("Retry") }
     }
-    if (hasSavedMap) TextButton(onClick = onClearSaved) { Text("Forget saved buttons") }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (state.captured.isNotEmpty()) TextButton(onClick = onFinishNow) { Text("Finish now") }
+        if (hasSavedMap) TextButton(onClick = onClearSaved) { Text("Forget saved buttons") }
+    }
 }
 
 @Composable
@@ -174,7 +179,7 @@ private fun FinishedContent(state: WizardState, onClose: () -> Unit, onStartTest
         WIZARD_STEPS.forEach { step ->
             val raw = state.captured[step.canonical]
             Text(
-                step.label + ":  " + (if (raw == null) "skipped" else "${EvdevNames.name(1, raw)} ($raw)"),
+                step.label + ":  " + (if (raw == null) "skipped" else sourceLabel(raw)),
                 style = MaterialTheme.typography.bodySmall,
                 color = if (raw == null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
             )
@@ -286,11 +291,20 @@ fun ControllerDiagram(spot: Spot?, modifier: Modifier = Modifier) {
         stick(0.26f, 0.46f, spot == Spot.LEFT_STICK)
         stick(0.62f, 0.72f, spot == Spot.RIGHT_STICK)
 
-        // d-pad (not asked for; just part of the picture)
+        // d-pad
         val dc = at(0.38f, 0.72f)
         val arm = 0.05f * h
-        drawRoundRect(outline, Offset(dc.x - arm * 2.4f, dc.y - arm * 0.8f), Size(arm * 4.8f, arm * 1.6f), CornerRadius(arm * 0.4f), style = thin)
-        drawRoundRect(outline, Offset(dc.x - arm * 0.8f, dc.y - arm * 2.4f), Size(arm * 1.6f, arm * 4.8f), CornerRadius(arm * 0.4f), style = thin)
+        fun dpadCell(dx: Float, dy: Float, hit: Boolean) {
+            val cell = Size(arm * 1.6f, arm * 1.6f)
+            val tl = Offset(dc.x + dx * cell.width - cell.width / 2, dc.y + dy * cell.height - cell.height / 2)
+            if (hit) drawRoundRect(accent, tl, cell, CornerRadius(arm * 0.3f))
+            else drawRoundRect(outline, tl, cell, CornerRadius(arm * 0.3f), style = thin)
+        }
+        dpadCell(0f, 0f, false)
+        dpadCell(0f, -1f, spot == Spot.DPAD_UP)
+        dpadCell(0f, 1f, spot == Spot.DPAD_DOWN)
+        dpadCell(-1f, 0f, spot == Spot.DPAD_LEFT)
+        dpadCell(1f, 0f, spot == Spot.DPAD_RIGHT)
 
         // face buttons in a diamond
         button(0.74f, 0.56f, 0.05f, spot == Spot.SOUTH)

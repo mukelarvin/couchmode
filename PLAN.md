@@ -49,6 +49,34 @@ just status + resume points, not the design doc.
 
 ## Session log
 
+### 2026-09-30 (g) - ignore the controllers in the list; D-pad setup (Claude Code)
+
+- **Retroid ignore list now covers the controllers in the list** (not only our virtual gamepad),
+  so the Retroid service should stop holding/copying them and we always read the real devices
+  (one setup per pad). The app owns only the names it added (kept in prefs
+  `retroid_owned_ignores`), never the onboard controls, and re-applies whenever the set of
+  external controller names changes. It takes effect when a pad next connects, so a pad that is
+  currently held needs reconnecting. The service still holds pad E9:92:0B until it is reconnected.
+  Luke approved this. A leftover friendly name from my wizard test ("TestWiz") was removed from
+  the app prefs.
+- **Trigger question (Luke):** measured with him squeezing the triggers: the Switch Pro pad sends
+  only digital ZL/ZR (values 0/1) through the Retroid copy, and the real device has no trigger
+  axes at all; CouchMode outputs BTN_TL2/TR2 plus an on/off ABS_BRAKE/GAS. Retroid's trigger
+  settings are unchanged since the start of the session (trigger_input_mode=2).
+- **D-pad in the wizard** (Luke asked about pads whose D-pad is buttons, or held sideways, like a
+  Wiimote): 4 new steps (up/down/left/right, before the bumpers; 17 steps now). A direction can be
+  a key press or a hat axis moving one way (source code `10000 + axis*2 + positive`); the map's
+  targets are pseudo codes 1000..1003. The daemon keeps D-pad state and emits HAT0X/HAT0Y on the
+  virtual gamepad (always declared now), dropping the consumed source events. "Finish now" ends
+  the wizard early; the diagram highlights individual D-pad arms; test mode handles hats.
+  Verified with fake pads under exclusive-grab safety (tools/test): buttons -> hat, and a
+  sideways hat -> rotated hat, exactly as expected. The wizard's D-pad steps and the new
+  diagram were NOT looked at on screen.
+- **Still not configurable:** which physical axes are the sticks and analog triggers
+  (RX/RY -> Z/RZ and Z/RZ -> BRAKE/GAS are automatic for Linux-layout pads). A controller with
+  unusual axes (or held sideways with a stick) would need axis steps ("push fully up").
+- New `tools/test/` (vgrab, uitest4, dpad_test.sh, README) implements the CLAUDE.md safety rules.
+
 ### 2026-09-30 (f) - first real wizard run: X/Y convention bug, maps per connection (Claude Code)
 
 Luke calibrated pad E9:92:0B and reported West and East swapped in Dolphin. What the data showed

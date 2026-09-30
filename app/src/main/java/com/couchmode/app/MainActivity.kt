@@ -103,6 +103,7 @@ class MainActivity : ComponentActivity() {
                                     onClearSaved = { wizard.clearSaved(entry) },
                                     onStartTest = wizard::startTest,
                                     onStopTest = wizard::stopTest,
+                                    onFinishNow = wizard::finishNow,
                                 )
                             }
                         }

@@ -4,6 +4,7 @@ import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.couchmode.app.daemon.DaemonClient
+import com.couchmode.app.daemon.EvdevNames
 import com.couchmode.app.daemon.PadDevice
 import com.couchmode.app.daemon.PriorityEntry
 import com.couchmode.app.daemon.RawEvent
@@ -19,9 +20,29 @@ import kotlinx.coroutines.launch
 /** Where on a generic controller a button sits. Positions, not letters: "A" is a different place on an Xbox and a Switch pad. */
 enum class Spot {
     SOUTH, EAST, WEST, NORTH,
+    DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT,
     LEFT_BUMPER, RIGHT_BUMPER, LEFT_TRIGGER, RIGHT_TRIGGER,
     SELECT, START, HOME, LEFT_STICK, RIGHT_STICK,
 }
+
+/** Pseudo "canonical" codes for the D-pad (the daemon turns them into HAT0X/HAT0Y): 1000 up, down, left, right. */
+const val DPAD_BASE = 1000
+
+/**
+ * A D-pad direction can come from a button (source = its key code) or from a hat axis moving one way
+ * (source = AXIS_SRC_BASE + axis * 2 + 1 if positive, else + 0). The daemon uses the same encoding.
+ */
+const val AXIS_SRC_BASE = 10000
+
+/** Human-readable name for something a controller sent: a key code or a hat direction. */
+fun sourceLabel(source: Int): String =
+    if (source >= AXIS_SRC_BASE) {
+        val axis = (source - AXIS_SRC_BASE) / 2
+        val positive = (source - AXIS_SRC_BASE) % 2 == 1
+        EvdevNames.name(3, axis) + if (positive) " +" else " -"
+    } else {
+        EvdevNames.name(1, source) + " ($source)"
+    }
 
 /** One question of the wizard: "press the button at [spot]"; its answer becomes the canonical evdev code [canonical]. */
 data class WizardStep(val canonical: Int, val spot: Spot, val label: String, val prompt: String, val hint: String)
@@ -51,6 +72,10 @@ val WIZARD_STEPS = listOf(
     WizardStep(BTN_EAST, Spot.EAST, "Right face button", "Press the right face button", "The rightmost of the four buttons"),
     WizardStep(BTN_WEST_XBOX, Spot.WEST, "Left face button", "Press the left face button", "The leftmost of the four buttons"),
     WizardStep(BTN_NORTH_XBOX, Spot.NORTH, "Top face button", "Press the top face button", "The highest of the four buttons"),
+    WizardStep(DPAD_BASE, Spot.DPAD_UP, "D-pad up", "Press up on the D-pad", "Buttons or a hat both work. Skip if there is no D-pad."),
+    WizardStep(DPAD_BASE + 1, Spot.DPAD_DOWN, "D-pad down", "Press down on the D-pad", "Whichever way you hold the controller"),
+    WizardStep(DPAD_BASE + 2, Spot.DPAD_LEFT, "D-pad left", "Press left on the D-pad", "Whichever way you hold the controller"),
+    WizardStep(DPAD_BASE + 3, Spot.DPAD_RIGHT, "D-pad right", "Press right on the D-pad", "Whichever way you hold the controller"),
     WizardStep(BTN_TL, Spot.LEFT_BUMPER, "Left bumper", "Press the left bumper", "The shoulder button on the left, nearest the top"),
     WizardStep(BTN_TR, Spot.RIGHT_BUMPER, "Right bumper", "Press the right bumper", "The shoulder button on the right, nearest the top"),
     WizardStep(BTN_TL2, Spot.LEFT_TRIGGER, "Left trigger", "Press the left trigger", "Skip this if your triggers are analog"),
@@ -136,18 +161,26 @@ class WizardViewModel : ViewModel() {
         }
     }
 
+    /** What this event is, as a map source: a key press, or (for D-pad questions) a hat moving one way; else null. */
+    private fun sourceOf(ev: RawEvent, dpadStep: Boolean): Int? = when {
+        ev.type == 1 && ev.value == 1 -> ev.code  // a key press (not a release or repeat)
+        dpadStep && ev.type == 3 && ev.code in 16..17 && ev.value != 0 ->
+            AXIS_SRC_BASE + ev.code * 2 + (if (ev.value > 0) 1 else 0)
+        else -> null
+    }
+
     private fun onEvent(ev: RawEvent) {
-        if (ev.type != 1 || ev.value != 1) return  // key presses only (not releases, repeats or axes)
         val s = _state.value
+        val source = sourceOf(ev, s.step.canonical >= DPAD_BASE) ?: return
         if (s.finished || s.justCaptured || s.error != null) return
         // Ignore anything that arrives right as a step starts (the tail of the previous press).
         if (SystemClock.elapsedRealtime() - stepStartedAt < 400) return
-        if (ev.code in s.captured.values) {
+        if (source in s.captured.values) {
             _state.update { it.copy(notice = "That button is already used. Try another.") }
             return
         }
         stepJob?.cancel()
-        _state.update { it.copy(captured = it.captured + (it.step.canonical to ev.code), justCaptured = true, notice = null) }
+        _state.update { it.copy(captured = it.captured + (it.step.canonical to source), justCaptured = true, notice = null) }
         viewModelScope.launch {
             delay(450)
             advance()
@@ -167,6 +200,12 @@ class WizardViewModel : ViewModel() {
     fun skip() {
         if (_state.value.justCaptured || _state.value.finished) return
         advance()
+    }
+
+    /** Ends the setup here with what has been captured so far (for a controller with few buttons). */
+    fun finishNow() {
+        if (_state.value.finished || _state.value.justCaptured) return
+        finish()
     }
 
     /** Goes back one question, forgetting that answer. */
@@ -231,8 +270,8 @@ class WizardViewModel : ViewModel() {
             var clearJob: Job? = null
             try {
                 DaemonClient.sniff(PadDevice(e.name, e.id, false, e.uniq), mute = true).collect { ev ->
-                    if (ev.type != 1 || ev.value != 1) return@collect
-                    val canonical = learned.entries.firstOrNull { it.value == ev.code }?.key
+                    val source = sourceOf(ev, dpadStep = true) ?: return@collect
+                    val canonical = learned.entries.firstOrNull { it.value == source }?.key
                     val step = WIZARD_STEPS.firstOrNull { it.canonical == canonical }
                     _state.update {
                         if (step != null) it.copy(testSpot = step.spot, testNote = step.label)

@@ -39,6 +39,11 @@
 //                            real device or on the Retroid service's copy of it. An entry can have
 //                            one map per kind; the one matching how the source is reached right
 //                            now is applied. Empty pairs clear that kind (empty kind: all kinds).
+//                            Canonical targets are evdev key codes, plus pseudo codes for the
+//                            D-pad: 1000 up, 1001 down, 1002 left, 1003 right. A source is a key
+//                            code, or 10000 + axis*2 + (1 if the positive direction) for a hat
+//                            axis (e.g. ABS_HAT0X negative = 10032). So buttons or a hat, held
+//                            any way up, can become the virtual D-pad (hat axes HAT0X/HAT0Y).
 //   GETMAP<TAB>name<TAB>id<TAB>uniq       -> M<TAB>kind<TAB>pairs   (empty fields if none)
 //   DECOY 0|1             -> OK     destroy/create the decoy gamepad (see create_decoy); saved
 //   RECREATE              -> OK     destroy and re-create the virtual gamepad (new device, same
@@ -121,6 +126,10 @@ struct devmap {
     int n;
     int from[MAX_MAP_PAIRS], to[MAX_MAP_PAIRS];
 };
+#define DPAD_BASE 1000        // pseudo "to" codes: 1000 up, 1001 down, 1002 left, 1003 right
+#define AXIS_SRC_BASE 10000   // pseudo "from" codes for hat directions: 10000 + axis*2 + positive
+static int g_dpad[4];                   // which virtual D-pad directions are held
+static int g_hat_x = 0, g_hat_y = 0;    // last HAT0X/HAT0Y values we emitted for the synthesized D-pad
 static struct devmap g_maps[MAX_MAPS];
 static int g_nmaps = 0;
 static const struct devmap *g_cur_map = NULL;  // map applied to the attached source, or NULL
@@ -427,6 +436,26 @@ static int create_virtual_from(int src, const char *vname) {
         g_axes[g_naxes++] = code;
         g_dmin[code] = 0;
         g_dmax[code] = g_trigger_max;
+    }
+
+    // ...and a D-pad hat, because a map can turn buttons (or a rotated hat) into one.
+    for (int i = 0; i < 2; i++) {
+        int code = i == 0 ? ABS_HAT0X : ABS_HAT0Y;
+        unsigned long have[NLONGS(ABS_MAX + 1)] = {0};
+        ioctl(src, EVIOCGBIT(EV_ABS, sizeof(have)), have);
+        if (TEST_BIT(code, have)) continue;  // already declared from the source above
+        struct uinput_abs_setup as;
+        memset(&as, 0, sizeof(as));
+        as.code = code;
+        as.absinfo.minimum = -1;
+        as.absinfo.maximum = 1;
+        if (ioctl(ui, UI_SET_ABSBIT, code) < 0 || ioctl(ui, UI_ABS_SETUP, &as) < 0) {
+            logf_("hat abs setup %d: %s", code, strerror(errno));
+            goto fail;
+        }
+        g_axes[g_naxes++] = code;
+        g_dmin[code] = -1;
+        g_dmax[code] = 1;
     }
 
     struct uinput_setup us;
@@ -1050,6 +1079,8 @@ static void detach_source(void) {
     g_active = -1;
     g_cur_map = NULL;
     g_dropping = 0;
+    memset(g_dpad, 0, sizeof(g_dpad));
+    g_hat_x = g_hat_y = 0;
 }
 
 // Opens, configures and grabs priority entry `idx`. Creates the virtual device
@@ -1131,6 +1162,30 @@ static int check_priority(void) {
     return 0;
 }
 
+// Turns the held D-pad directions into HAT0X/HAT0Y events on the virtual gamepad (only when they
+// change). Returns -1 on a fatal write error.
+static int emit_dpad(int allow) {
+    int hx = g_dpad[3] - g_dpad[2];  // right - left
+    int hy = g_dpad[1] - g_dpad[0];  // down - up
+    if (!allow || (hx == g_hat_x && hy == g_hat_y)) return 0;
+    struct input_event ev;
+    for (int axis = 0; axis < 2; axis++) {
+        int v = axis == 0 ? hx : hy;
+        if (v == (axis == 0 ? g_hat_x : g_hat_y)) continue;
+        memset(&ev, 0, sizeof(ev));
+        ev.type = EV_ABS;
+        ev.code = axis == 0 ? ABS_HAT0X : ABS_HAT0Y;
+        ev.value = v;
+        if (write(g_ui, &ev, sizeof(ev)) < 0 && errno != EAGAIN) {
+            logf_("write uinput: %s", strerror(errno));
+            return -1;
+        }
+    }
+    g_hat_x = hx;
+    g_hat_y = hy;
+    return 0;
+}
+
 // Destroys and re-creates the virtual gamepad, re-attaching the current source. The
 // Retroid service checks its ignore list only when a device appears, so this is how
 // a newly added ignore entry takes effect on a device it already holds.
@@ -1173,14 +1228,40 @@ static int pump_source(void) {
         out.code = ev->code;
         out.value = ev->value;
         int forward_it = 1;
+        int dpad_changed = 0;
         if (g_cur_map && ev->type == EV_KEY) {
             int to = map_code(g_cur_map, ev->code);
-            if (to >= 0) out.code = to;
-            else if (is_canonical_button(ev->code)) forward_it = 0;  // a gamepad button the map doesn't cover
+            if (to >= DPAD_BASE && to < DPAD_BASE + 4) {  // a button that acts as a D-pad direction
+                g_dpad[to - DPAD_BASE] = ev->value != 0;
+                dpad_changed = 1;
+                forward_it = 0;
+            } else if (to >= 0) {
+                out.code = to;
+            } else if (is_canonical_button(ev->code)) {
+                forward_it = 0;  // a gamepad button the map doesn't cover
+            }
+        } else if (g_cur_map && ev->type == EV_ABS && ev->code <= ABS_MAX) {
+            // A hat (or any axis) direction that acts as a D-pad direction, e.g. a pad held sideways.
+            int neg = map_code(g_cur_map, AXIS_SRC_BASE + ev->code * 2);
+            int pos = map_code(g_cur_map, AXIS_SRC_BASE + ev->code * 2 + 1);
+            int neg_ok = neg >= DPAD_BASE && neg < DPAD_BASE + 4;
+            int pos_ok = pos >= DPAD_BASE && pos < DPAD_BASE + 4;
+            if (neg_ok) g_dpad[neg - DPAD_BASE] = ev->value < 0;
+            if (pos_ok) g_dpad[pos - DPAD_BASE] = ev->value > 0;
+            if (neg_ok || pos_ok) {
+                dpad_changed = 1;
+                forward_it = 0;  // consumed: the synthesized hat replaces it
+            }
         }
         // The button wizard mutes forwarding while it listens, so presses don't click through the UI.
         for (int c = 0; c < MAX_CLIENTS; c++)
             if (g_clients[c].fd >= 0 && g_clients[c].mute && g_clients[c].sniff_source) forward_it = 0;
+        if (dpad_changed) {
+            int muted = 0;
+            for (int c = 0; c < MAX_CLIENTS; c++)
+                if (g_clients[c].fd >= 0 && g_clients[c].mute && g_clients[c].sniff_source) muted = 1;
+            if (emit_dpad(!muted) < 0) return -1;
+        }
         if (ev->type == EV_ABS && ev->code <= ABS_MAX && g_remap[ev->code].active) {
             const struct axis_remap *m = &g_remap[ev->code];
             out.code = m->dst;
