@@ -97,6 +97,17 @@ static int g_dropping = 0;         // discarding events until the next SYN_REPOR
 static int g_synth_triggers = 0;   // source has BTN_TL2/TR2 buttons: synthesize ABS_BRAKE/ABS_GAS from them...
 static int g_analog_seen[2];       // ...until the source actually sends that analog axis (0 = BRAKE, 1 = GAS)
 static int g_trigger_max = 32767;  // full-press value of the virtual device's ABS_GAS/ABS_BRAKE
+// Range of each axis the virtual device declares, so other pads' axes can be scaled onto it.
+static long g_dmin[ABS_MAX + 1], g_dmax[ABS_MAX + 1];
+// Axis remap for the attached source: its code -> a virtual-device code, with scaling.
+// Most Linux pads report the right stick as RX/RY (and analog triggers as Z/RZ), while
+// the virtual device follows the Retroid convention: right stick on Z/RZ, triggers on
+// BRAKE/GAS.
+static struct axis_remap {
+    int active;
+    int dst;
+    long smin, smax;
+} g_remap[ABS_MAX + 1];
 
 static void on_signal(int sig) {
     (void)sig;
@@ -245,6 +256,8 @@ static int create_virtual_from(int src, const char *vname) {
                 goto fail;
             }
             g_axes[g_naxes++] = a;
+            g_dmin[a] = info.minimum;
+            g_dmax[a] = info.maximum;
         }
     }
 
@@ -270,6 +283,8 @@ static int create_virtual_from(int src, const char *vname) {
             goto fail;
         }
         g_axes[g_naxes++] = code;
+        g_dmin[code] = 0;
+        g_dmax[code] = g_trigger_max;
     }
 
     struct uinput_setup us;
@@ -596,6 +611,15 @@ static int listen_abstract(void) {
 
 // ---- forwarding -----------------------------------------------------------
 
+static void add_remap(int src_fd, int from, int to) {
+    struct input_absinfo info;
+    if (ioctl(src_fd, EVIOCGABS(from), &info) < 0 || info.maximum == info.minimum) return;
+    g_remap[from].active = 1;
+    g_remap[from].dst = to;
+    g_remap[from].smin = info.minimum;
+    g_remap[from].smax = info.maximum;
+}
+
 // Releases every button/axis on the virtual device so nothing stays stuck
 // when the source changes or disappears mid-press.
 static void reset_virtual(void) {
@@ -664,6 +688,18 @@ static int attach_entry(int idx) {
     (void)absbits;
     g_synth_triggers = TEST_BIT(BTN_TL2, keybits) || TEST_BIT(BTN_TR2, keybits);
     g_analog_seen[0] = g_analog_seen[1] = 0;
+    memset(g_remap, 0, sizeof(g_remap));
+    if (TEST_BIT(ABS_RX, absbits) && TEST_BIT(ABS_RY, absbits)) {
+        // Standard Linux layout: right stick on RX/RY -> our Z/RZ.
+        add_remap(src, ABS_RX, ABS_Z);
+        add_remap(src, ABS_RY, ABS_RZ);
+        // Xbox/PlayStation-style pads put the analog triggers on Z/RZ.
+        if (TEST_BIT(ABS_Z, absbits) && TEST_BIT(ABS_RZ, absbits)) {
+            add_remap(src, ABS_Z, ABS_BRAKE);
+            add_remap(src, ABS_RZ, ABS_GAS);
+        }
+        logf_("remapping right stick RX/RY -> Z/RZ%s", g_remap[ABS_Z].active ? ", triggers Z/RZ -> BRAKE/GAS" : "");
+    }
     g_src = src;
     g_active = idx;
     g_dropping = 0;
@@ -713,13 +749,19 @@ static int pump_source(void) {
         out.type = ev->type;
         out.code = ev->code;
         out.value = ev->value;
+        if (ev->type == EV_ABS && ev->code <= ABS_MAX && g_remap[ev->code].active) {
+            const struct axis_remap *m = &g_remap[ev->code];
+            out.code = m->dst;
+            out.value = (int)(g_dmin[m->dst] + ((long)ev->value - m->smin) * (g_dmax[m->dst] - g_dmin[m->dst]) /
+                                                   (m->smax - m->smin));
+        }
         if (write(g_ui, &out, sizeof(out)) < 0) {
             if (errno == EAGAIN || errno == EINTR) continue;
             logf_("write uinput: %s", strerror(errno));
             return -1;
         }
-        if (ev->type == EV_ABS && ev->code == ABS_BRAKE) g_analog_seen[0] = 1;
-        if (ev->type == EV_ABS && ev->code == ABS_GAS) g_analog_seen[1] = 1;
+        if (out.type == EV_ABS && out.code == ABS_BRAKE) g_analog_seen[0] = 1;
+        if (out.type == EV_ABS && out.code == ABS_GAS) g_analog_seen[1] = 1;
         if (g_synth_triggers && ev->type == EV_KEY && (ev->code == BTN_TL2 || ev->code == BTN_TR2) &&
             !g_analog_seen[ev->code == BTN_TL2 ? 0 : 1]) {
             // Android convention: left trigger = ABS_BRAKE, right = ABS_GAS. Instant 0/max, no ramping.

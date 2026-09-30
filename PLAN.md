@@ -90,6 +90,18 @@ just status + resume points, not the design doc.
   device (copied from the Retroid) uses ABS_Z/RZ, so the right stick and possibly
   face buttons won't line up until canonical mapping exists.
 
+- **Axis remap (2026-09-30):** a source with RX/RY gets them forwarded as our
+  Z/RZ (the Retroid-convention right stick), scaled to the virtual range; if it
+  also has Z/RZ (Xbox/PlayStation-style analog triggers) those go to BRAKE/GAS,
+  scaled. Verified with fake pads (no presses): RX/RY +-20000 -> Z/RZ +-20000;
+  trigger 255/255 -> 32767, 128/255 -> 16447. Luke confirmed the raw Switch Pro
+  pad's right stick did NOT work before this; needs re-testing with the real pad.
+  Face-button layout (Nintendo A/B vs Xbox) is still NOT handled - wizard's job.
+- **UI bugs fixed the same day:** rows stuck mid-drag (rows were not keyed by
+  controller, so a swap tore down the drag gesture) and some reorders not saved
+  (drag handler compared against a stale copy of the list). Verified on the device
+  with `adb shell input swipe`: 4 drags -> 4 saves.
+
 - Not done yet: canonical virtual layout + rumble, first-run flow, wizard,
   the face-button swap investigation (parked by Luke), root-menu launch test.
 
