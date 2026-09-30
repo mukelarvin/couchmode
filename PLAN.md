@@ -49,6 +49,35 @@ just status + resume points, not the design doc.
 
 ## Session log
 
+### 2026-09-30 (f) - first real wizard run: X/Y convention bug, maps per connection (Claude Code)
+
+Luke calibrated pad E9:92:0B and reported West and East swapped in Dolphin. What the data showed
+(read-only: saved map, Dolphin's GCPadNew.ini, daemon log):
+
+- **My bug: wrong canonical codes for west/north.** The wizard used the Linux names (west = 308,
+  north = 307). Android, Dolphin (which is bound to `Button A/B/X/Y`) and the Retroid's own pad use
+  the Xbox convention: KEYCODE_BUTTON_X (code 307) is the LEFT face button and BUTTON_Y (308) the
+  TOP one. Fixed: WEST = 307, NORTH = 308 (comment in WizardViewModel.kt says not to "fix" it
+  back). The map file now has an `@layout 2` header; maps from the first wizard (no header /
+  layout 1) are ignored with a log line, so those pads must be set up again.
+- **A pad is reached two ways, and they send different codes.** Raw device, or the Retroid
+  service's copy (when the service holds the pad). Which one we get changes across reconnects and
+  daemon restarts (E9:92:0B was raw when calibrated, then held/copy after a restart, so the
+  raw-learned map rightly stopped applying). Maps are now stored PER KIND: an entry can have a raw
+  map and a copy map and the one matching the current connection is applied. GETPRIO map field:
+  1 = set up for the current connection, 2 = only for the other one (row says "Set up buttons
+  again"), 0 none. The status for the attached source uses how it is really being read.
+- **Saved capture looked rotated:** the old map had raw 307 for the "right" prompt, 304 for "left",
+  308 for "top" (physical top, right, left on a label-based Nintendo pad, i.e. presses out of order
+  relative to the prompts). Cause not determined (user error vs something in the wizard). Added:
+  the result screen lists the raw button captured for each prompt, and a "Test buttons" mode lights
+  up the diagram position for each press (controller stays muted). Not yet seen running with a real pad.
+- **Open question for Luke (bypass):** add each listed pad's name to the Retroid ignore list too, so
+  the service never holds/copies them and we always get the raw device (one setup per pad,
+  consistent codes). Takes effect when the pad next connects. Not done; needs Luke's OK.
+- Not verified: anything with the real pads' buttons (needs Luke; fake input must follow the
+  testing rules in CLAUDE.md).
+
 ### 2026-09-30 (e) - button wizard and friendly names (Claude Code)
 
 Luke wanted the wizard so the A/B (and X/Y) buttons land in the right places, and friendly

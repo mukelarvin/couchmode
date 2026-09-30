@@ -24,14 +24,18 @@ enum class Spot {
 }
 
 /** One question of the wizard: "press the button at [spot]"; its answer becomes the canonical evdev code [canonical]. */
-data class WizardStep(val canonical: Int, val spot: Spot, val prompt: String, val hint: String)
+data class WizardStep(val canonical: Int, val spot: Spot, val label: String, val prompt: String, val hint: String)
 
-// Canonical evdev button codes (linux/input-event-codes.h). These are what the virtual gamepad emits,
-// so they are what emulators see, whatever layout the physical controller has.
-private const val BTN_SOUTH = 304
-private const val BTN_EAST = 305
-private const val BTN_NORTH = 307
-private const val BTN_WEST = 308
+// Canonical evdev button codes: what the virtual gamepad emits, so what emulators see, whatever
+// layout the physical controller has. They follow Android's convention, which is what emulators
+// and the Retroid's own controls use: KEYCODE_BUTTON_A/B/X/Y = codes 304/305/307/308, placed
+// south / east / WEST / NORTH ("X is the left-most face button, Y the top-most"). The Linux header
+// names 307 "BTN_NORTH" and 308 "BTN_WEST", which is the opposite of where Android puts X and Y,
+// so do not "fix" the west/north codes below to match those names.
+private const val BTN_SOUTH = 304  // Android A
+private const val BTN_EAST = 305   // Android B
+private const val BTN_WEST_XBOX = 307   // Android X, the left face button
+private const val BTN_NORTH_XBOX = 308  // Android Y, the top face button
 private const val BTN_TL = 310
 private const val BTN_TR = 311
 private const val BTN_TL2 = 312
@@ -43,19 +47,19 @@ private const val BTN_THUMBL = 317
 private const val BTN_THUMBR = 318
 
 val WIZARD_STEPS = listOf(
-    WizardStep(BTN_SOUTH, Spot.SOUTH, "Press the bottom face button", "The lowest of the four buttons on the right"),
-    WizardStep(BTN_EAST, Spot.EAST, "Press the right face button", "The rightmost of the four buttons"),
-    WizardStep(BTN_WEST, Spot.WEST, "Press the left face button", "The leftmost of the four buttons"),
-    WizardStep(BTN_NORTH, Spot.NORTH, "Press the top face button", "The highest of the four buttons"),
-    WizardStep(BTN_TL, Spot.LEFT_BUMPER, "Press the left bumper", "The shoulder button on the left, nearest the top"),
-    WizardStep(BTN_TR, Spot.RIGHT_BUMPER, "Press the right bumper", "The shoulder button on the right, nearest the top"),
-    WizardStep(BTN_TL2, Spot.LEFT_TRIGGER, "Press the left trigger", "Skip this if your triggers are analog"),
-    WizardStep(BTN_TR2, Spot.RIGHT_TRIGGER, "Press the right trigger", "Skip this if your triggers are analog"),
-    WizardStep(BTN_SELECT, Spot.SELECT, "Press Select (Back)", "The small button just left of center"),
-    WizardStep(BTN_START, Spot.START, "Press Start (Menu)", "The small button just right of center"),
-    WizardStep(BTN_MODE, Spot.HOME, "Press the Home button", "The button in the middle, usually a logo"),
-    WizardStep(BTN_THUMBL, Spot.LEFT_STICK, "Click in the left stick", "Push the left stick straight down"),
-    WizardStep(BTN_THUMBR, Spot.RIGHT_STICK, "Click in the right stick", "Push the right stick straight down"),
+    WizardStep(BTN_SOUTH, Spot.SOUTH, "Bottom face button", "Press the bottom face button", "The lowest of the four buttons on the right"),
+    WizardStep(BTN_EAST, Spot.EAST, "Right face button", "Press the right face button", "The rightmost of the four buttons"),
+    WizardStep(BTN_WEST_XBOX, Spot.WEST, "Left face button", "Press the left face button", "The leftmost of the four buttons"),
+    WizardStep(BTN_NORTH_XBOX, Spot.NORTH, "Top face button", "Press the top face button", "The highest of the four buttons"),
+    WizardStep(BTN_TL, Spot.LEFT_BUMPER, "Left bumper", "Press the left bumper", "The shoulder button on the left, nearest the top"),
+    WizardStep(BTN_TR, Spot.RIGHT_BUMPER, "Right bumper", "Press the right bumper", "The shoulder button on the right, nearest the top"),
+    WizardStep(BTN_TL2, Spot.LEFT_TRIGGER, "Left trigger", "Press the left trigger", "Skip this if your triggers are analog"),
+    WizardStep(BTN_TR2, Spot.RIGHT_TRIGGER, "Right trigger", "Press the right trigger", "Skip this if your triggers are analog"),
+    WizardStep(BTN_SELECT, Spot.SELECT, "Select", "Press Select (Back)", "The small button just left of center"),
+    WizardStep(BTN_START, Spot.START, "Start", "Press Start (Menu)", "The small button just right of center"),
+    WizardStep(BTN_MODE, Spot.HOME, "Home", "Press the Home button", "The button in the middle, usually a logo"),
+    WizardStep(BTN_THUMBL, Spot.LEFT_STICK, "Left stick click", "Click in the left stick", "Push the left stick straight down"),
+    WizardStep(BTN_THUMBR, Spot.RIGHT_STICK, "Right stick click", "Click in the right stick", "Push the right stick straight down"),
 )
 
 const val STEP_SECONDS = 10
@@ -72,6 +76,10 @@ data class WizardState(
     /** Null while saving; true once the daemon has the map; false if nothing was captured. */
     val saved: Boolean? = null,
     val error: String? = null,
+    /** Test mode (after setup): the position whose button was just pressed, if it is set up. */
+    val testing: Boolean = false,
+    val testSpot: Spot? = null,
+    val testNote: String? = null,
 ) {
     val step: WizardStep get() = WIZARD_STEPS[index.coerceIn(0, WIZARD_STEPS.lastIndex)]
 }
@@ -208,6 +216,47 @@ class WizardViewModel : ViewModel() {
         }
     }
 
+    private var testJob: Job? = null
+
+    /**
+     * After setup: lights up the diagram for whichever position you press, using what was just learned,
+     * so a wrong setup is visible right away. The controller stays muted, so nothing reaches the app or a game.
+     */
+    fun startTest() {
+        val e = entry ?: return
+        val learned = _state.value.captured  // canonical -> raw
+        _state.update { it.copy(testing = true, testSpot = null, testNote = "Press any button") }
+        testJob?.cancel()
+        testJob = viewModelScope.launch {
+            var clearJob: Job? = null
+            try {
+                DaemonClient.sniff(PadDevice(e.name, e.id, false, e.uniq), mute = true).collect { ev ->
+                    if (ev.type != 1 || ev.value != 1) return@collect
+                    val canonical = learned.entries.firstOrNull { it.value == ev.code }?.key
+                    val step = WIZARD_STEPS.firstOrNull { it.canonical == canonical }
+                    _state.update {
+                        if (step != null) it.copy(testSpot = step.spot, testNote = step.label)
+                        else it.copy(testSpot = null, testNote = "That button isn't set up")
+                    }
+                    clearJob?.cancel()
+                    clearJob = launch {
+                        delay(700)
+                        _state.update { it.copy(testSpot = null, testNote = "Press any button") }
+                    }
+                }
+            } catch (ex: CancellationException) {
+                throw ex
+            } catch (ex: Exception) {
+                _state.update { it.copy(testing = false, error = "Lost contact with the controller.") }
+            }
+        }
+    }
+
+    fun stopTest() {
+        testJob?.cancel()
+        _state.update { it.copy(testing = false, testSpot = null, testNote = null) }
+    }
+
     /** Forgets this controller's saved buttons. */
     fun clearSaved(entry: PriorityEntry) {
         viewModelScope.launch { runCatching { DaemonClient.setMapping(entry, "", emptyMap()) } }
@@ -217,6 +266,7 @@ class WizardViewModel : ViewModel() {
     fun cancel() {
         stepJob?.cancel()
         listenJob?.cancel()
+        testJob?.cancel()
         entry = null
     }
 

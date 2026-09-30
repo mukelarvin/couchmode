@@ -36,8 +36,9 @@
 //   SETMAP<TAB>name<TAB>id<TAB>uniq<TAB>kind<TAB>from=to,from=to,...  -> OK   save the button map
 //                            for that controller entry: raw evdev key code -> canonical code
 //                            (decimal). `kind` is "raw" or "copy": whether it was learned on the
-//                            real device or on the Retroid service's copy of it; a map is applied
-//                            only while the source is reached the same way. Empty pairs clear it.
+//                            real device or on the Retroid service's copy of it. An entry can have
+//                            one map per kind; the one matching how the source is reached right
+//                            now is applied. Empty pairs clear that kind (empty kind: all kinds).
 //   GETMAP<TAB>name<TAB>id<TAB>uniq       -> M<TAB>kind<TAB>pairs   (empty fields if none)
 //   DECOY 0|1             -> OK     destroy/create the decoy gamepad (see create_decoy); saved
 //   RECREATE              -> OK     destroy and re-create the virtual gamepad (new device, same
@@ -106,6 +107,10 @@ static char g_active_id[32];
 static char g_active_uniq[40];
 // Per-controller button maps (raw evdev key code -> canonical code), learned by the wizard.
 #define MAPS_PATH "/data/local/tmp/couchmode-maps.conf"
+// Version of the canonical button layout the maps were learned against. Version 1 (the first
+// wizard) put west/north on the Linux-named codes 308/307, which is the opposite of Android's
+// X/Y placement; version 2 uses 307 (X) west and 308 (Y) north. Maps from other versions are ignored.
+#define MAPS_LAYOUT 2
 #define MAX_MAPS 16
 #define MAX_MAP_PAIRS 24
 struct devmap {
@@ -555,11 +560,34 @@ static int map_code(const struct devmap *m, int code) {
     return -1;
 }
 
-static struct devmap *find_map(const char *name, const char *id, const char *uniq) {
+// A controller can have one map per way it is reached ("raw" device or the Retroid service's
+// "copy" of it), because the two send different button codes and which one we get depends on
+// whether the service is holding the pad at that moment.
+static struct devmap *find_map(const char *name, const char *id, const char *uniq, const char *kind) {
     for (int i = 0; i < g_nmaps; i++)
-        if (strcmp(g_maps[i].name, name) == 0 && strcmp(g_maps[i].id, id) == 0 && strcmp(g_maps[i].uniq, uniq) == 0)
+        if (strcmp(g_maps[i].name, name) == 0 && strcmp(g_maps[i].id, id) == 0 &&
+            strcmp(g_maps[i].uniq, uniq) == 0 && strcmp(g_maps[i].kind, kind) == 0)
             return &g_maps[i];
     return NULL;
+}
+
+// True if the entry has a map for any kind.
+static int has_any_map(const char *name, const char *id, const char *uniq) {
+    for (int i = 0; i < g_nmaps; i++)
+        if (strcmp(g_maps[i].name, name) == 0 && strcmp(g_maps[i].id, id) == 0 && strcmp(g_maps[i].uniq, uniq) == 0)
+            return 1;
+    return 0;
+}
+
+// Removes maps for the entry: only `kind` if non-empty, else every kind.
+static void remove_maps(const char *name, const char *id, const char *uniq, const char *kind) {
+    for (int i = g_nmaps - 1; i >= 0; i--) {
+        if (strcmp(g_maps[i].name, name) == 0 && strcmp(g_maps[i].id, id) == 0 &&
+            strcmp(g_maps[i].uniq, uniq) == 0 && (kind[0] == 0 || strcmp(g_maps[i].kind, kind) == 0)) {
+            g_maps[i] = g_maps[--g_nmaps];
+            memset(&g_maps[g_nmaps], 0, sizeof(g_maps[0]));
+        }
+    }
 }
 
 static void format_pairs(const struct devmap *m, char *out, size_t cap) {
@@ -588,6 +616,7 @@ static void save_maps(void) {
         logf_("cannot write %s: %s", MAPS_PATH, strerror(errno));
         return;
     }
+    fprintf(f, "@layout\t%d\n", MAPS_LAYOUT);
     for (int i = 0; i < g_nmaps; i++) {
         char pairs[512];
         format_pairs(&g_maps[i], pairs, sizeof(pairs));
@@ -602,8 +631,18 @@ static void load_maps(void) {
     if (!f) return;
     char line[NAME_LEN + 700];
     g_nmaps = 0;
+    int layout = 1;  // files without a header were written by the first wizard
     while (g_nmaps < MAX_MAPS && fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\r\n")] = 0;
+        if (strncmp(line, "@layout\t", 8) == 0) {
+            layout = atoi(line + 8);
+            continue;
+        }
+        if (layout != MAPS_LAYOUT) {
+            logf_("ignoring saved button maps: they use button layout %d, this version uses %d. Set controllers up again.",
+                  layout, MAPS_LAYOUT);
+            break;
+        }
         char *fld[5];
         int nf = 0;
         char *p = line;
@@ -626,20 +665,21 @@ static void load_maps(void) {
     fclose(f);
 }
 
-// Works out which map (if any) applies to the attached source. A map learned on the real
-// device is wrong for the Retroid copy of it (and vice versa), so kinds must match.
+// Works out which map (if any) applies to the attached source: the one learned for the way the
+// source is being reached right now.
 static void refresh_cur_map(void) {
     g_cur_map = NULL;
     if (g_src < 0 || g_active < 0) return;
-    const struct devmap *m = find_map(g_prio[g_active].name, g_prio[g_active].id, g_prio[g_active].uniq);
-    if (!m) return;
-    if (m->kind[0] && strcmp(m->kind, g_active_kind) != 0) {
-        logf_("button map for \"%s\" was learned on the %s device but the source is now the %s one: not applying",
-              m->name, m->kind, g_active_kind);
+    const struct prio_entry *e = &g_prio[g_active];
+    const struct devmap *m = find_map(e->name, e->id, e->uniq, g_active_kind);
+    if (!m) {
+        if (has_any_map(e->name, e->id, e->uniq))
+            logf_("\"%s\" has a button map, but not for the %s connection it has now: not applying", e->name,
+                  g_active_kind);
         return;
     }
     g_cur_map = m;
-    logf_("applying button map for \"%s\" (%d buttons)", m->name, m->n);
+    logf_("applying %s button map for \"%s\" (%d buttons)", g_active_kind, m->name, m->n);
 }
 
 // ---- clients --------------------------------------------------------------
@@ -801,16 +841,20 @@ static void handle_line(struct client *c, char *line) {
     } else if (strcmp(line, "GETPRIO") == 0) {
         for (int i = 0; i < g_nprio; i++) {
             int fd = open_by_name(g_prio[i].name, g_prio[i].id, g_prio[i].uniq);
-            int mapstate = 0;
-            const struct devmap *m = find_map(g_prio[i].name, g_prio[i].id, g_prio[i].uniq);
-            if (m) {
-                mapstate = 1;
+            int mapstate = 0;  // 0 none, 1 set up for the current connection, 2 only for the other one
+            if (has_any_map(g_prio[i].name, g_prio[i].id, g_prio[i].uniq)) {
                 struct input_id iid;
                 char idstr[32];
-                if (fd >= 0 && ioctl(fd, EVIOCGID, &iid) == 0) {
+                // For the attached source, trust how we are actually reading it: opening the device
+                // again can return the Retroid service's copy if it took the pad after we attached.
+                const char *now = NULL;
+                if (i == g_active && g_src >= 0) now = g_active_kind;
+                else if (fd >= 0 && ioctl(fd, EVIOCGID, &iid) == 0) {
                     format_id(&iid, idstr, sizeof(idstr));
-                    if (m->kind[0] && strcmp(m->kind, kind_of_id(idstr)) != 0) mapstate = 2;
+                    now = kind_of_id(idstr);
                 }
+                if (!now) mapstate = 1;  // not connected: we can't tell which way it will be reached
+                else mapstate = find_map(g_prio[i].name, g_prio[i].id, g_prio[i].uniq, now) ? 1 : 2;
             }
             char out[NAME_LEN + 140];
             snprintf(out, sizeof(out), "P\t%s\t%s\t%s\t%d\t%d\t%d\n", g_prio[i].name, g_prio[i].id, g_prio[i].uniq,
@@ -862,24 +906,20 @@ static void handle_line(struct client *c, char *line) {
         if (nf != 5) {
             send_str(c->fd, "ERR badmap\n");
         } else {
-            struct devmap *m = find_map(fld[0], fld[1], fld[2]);
-            if (fld[4][0] == 0) {  // clear
-                if (m) {
-                    *m = g_maps[--g_nmaps];
-                    memset(&g_maps[g_nmaps], 0, sizeof(g_maps[0]));
-                }
+            struct devmap *m = NULL;
+            if (fld[4][0] == 0) {  // clear (only `kind`, or every kind if kind is empty)
+                remove_maps(fld[0], fld[1], fld[2], fld[3]);
             } else {
+                m = find_map(fld[0], fld[1], fld[2], fld[3]);
                 if (!m && g_nmaps < MAX_MAPS) {
                     m = &g_maps[g_nmaps++];
                     memset(m, 0, sizeof(*m));
                     snprintf(m->name, sizeof(m->name), "%s", fld[0]);
                     snprintf(m->id, sizeof(m->id), "%s", fld[1]);
                     snprintf(m->uniq, sizeof(m->uniq), "%s", fld[2]);
-                }
-                if (m) {
                     snprintf(m->kind, sizeof(m->kind), "%s", fld[3]);
-                    parse_pairs(fld[4], m);
                 }
+                if (m) parse_pairs(fld[4], m);
             }
             save_maps();
             refresh_cur_map();
@@ -888,7 +928,10 @@ static void handle_line(struct client *c, char *line) {
     } else if (strncmp(line, "GETMAP\t", 7) == 0) {
         char *a, *b, *u;
         split3(line + 7, &a, &b, &u);
-        const struct devmap *m = find_map(a, b, u);
+        const struct devmap *m = find_map(a, b, u, g_active_kind);
+        for (int k = 0; !m && k < g_nmaps; k++)  // none for the current connection: show any
+            if (strcmp(g_maps[k].name, a) == 0 && strcmp(g_maps[k].id, b) == 0 && strcmp(g_maps[k].uniq, u) == 0)
+                m = &g_maps[k];
         char pairs[512] = "", out[600];
         if (m) format_pairs(m, pairs, sizeof(pairs));
         snprintf(out, sizeof(out), "M\t%s\t%s\n", m ? m->kind : "", pairs);

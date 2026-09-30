@@ -37,6 +37,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.couchmode.app.daemon.EvdevNames
 import com.couchmode.app.wizard.Spot
 import com.couchmode.app.wizard.WIZARD_STEPS
 import com.couchmode.app.wizard.WizardState
@@ -58,6 +59,8 @@ fun WizardScreen(
     onBack: () -> Unit,
     onClose: () -> Unit,
     onClearSaved: () -> Unit,
+    onStartTest: () -> Unit,
+    onStopTest: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Scaffold(
@@ -71,7 +74,7 @@ fun WizardScreen(
                     }
                 },
                 actions = {
-                    if (!state.finished) {
+                    if (!state.finished && !state.testing) {
                         Text(
                             "${state.index + 1} / ${WIZARD_STEPS.size}",
                             modifier = Modifier.padding(end = 16.dp),
@@ -97,7 +100,8 @@ fun WizardScreen(
                     Text(state.error, textAlign = TextAlign.Center)
                     Button(onClick = onClose) { Text("Close") }
                 }
-                state.finished -> FinishedContent(state, onClose)
+                state.testing -> TestContent(state, onStopTest)
+                state.finished -> FinishedContent(state, onClose, onStartTest)
                 else -> StepContent(state, hasSavedMap, onSkip, onRetry, onBack, onClearSaved)
             }
         }
@@ -147,7 +151,7 @@ private fun StepContent(
 }
 
 @Composable
-private fun FinishedContent(state: WizardState, onClose: () -> Unit) {
+private fun FinishedContent(state: WizardState, onClose: () -> Unit, onStartTest: () -> Unit) {
     val count = state.captured.size
     Text(
         when (state.saved) {
@@ -159,14 +163,52 @@ private fun FinishedContent(state: WizardState, onClose: () -> Unit) {
     )
     Text(
         when (state.saved) {
-            true -> "Saved $count of ${WIZARD_STEPS.size} buttons. Games will now see this controller's buttons in the right places."
+            true -> "Saved $count of ${WIZARD_STEPS.size} buttons. Check the list below, or test it by pressing buttons."
             false -> "No buttons were pressed, so the saved setup (if any) is unchanged."
             null -> ""
         },
         textAlign = TextAlign.Center,
     )
-    ProgressDots(state)
-    Button(onClick = onClose, enabled = state.saved != null) { Text("Done") }
+    // What was actually heard for each question, so a wrong setup is easy to spot.
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        WIZARD_STEPS.forEach { step ->
+            val raw = state.captured[step.canonical]
+            Text(
+                step.label + ":  " + (if (raw == null) "skipped" else "${EvdevNames.name(1, raw)} ($raw)"),
+                style = MaterialTheme.typography.bodySmall,
+                color = if (raw == null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+            )
+        }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (state.saved == true) OutlinedButton(onClick = onStartTest) { Text("Test buttons") }
+        Button(onClick = onClose, enabled = state.saved != null) { Text("Done") }
+    }
+}
+
+/** Live check after setup: press a button and its position lights up. */
+@Composable
+private fun TestContent(state: WizardState, onStop: () -> Unit) {
+    ControllerDiagram(
+        spot = state.testSpot,
+        modifier = Modifier
+            .widthIn(max = 250.dp)
+            .fillMaxWidth(),
+    )
+    Text("Press buttons to check them", style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+    Text(
+        state.testNote ?: "",
+        style = MaterialTheme.typography.headlineSmall,
+        color = if (state.testSpot != null) DoneGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center,
+    )
+    Text(
+        "The highlighted spot is where CouchMode thinks the button is. If it is wrong, run the setup again.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center,
+    )
+    Button(onClick = onStop) { Text("Back") }
 }
 
 @Composable
