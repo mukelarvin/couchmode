@@ -14,3 +14,6 @@ These drive fake input on a real handheld, so they follow the rules in CLAUDE.md
 Build for the device with the NDK (`aarch64-linux-android26-clang file.c -o name`), push to
 `/data/local/tmp`, and run with `adb shell`. The daemon socket client `cc` used by the script is a
 few-line abstract-socket client (connect to `@couchmode`, send lines, print replies).
+- `ffplay.c` - acts like Android's rumble request: uploads one FF_RUMBLE effect to an input node and plays it.
+  Point it at the "CouchMode Virtual Gamepad" node and the active source pad should vibrate. Sends no button
+  or stick input. `ffplay /dev/input/eventN [strong] [weak] [ms]`.

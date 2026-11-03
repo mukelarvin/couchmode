@@ -65,6 +65,85 @@ tested on exactly this build. A firmware or app update can change any of it, so 
 
 ## Session log
 
+### 2026-11-02 - Linux CLI build set up; "New Controller Takeover" tested (Claude Code)
+
+- **Local CLI build now works** on Bazzite (Fedora): JDK 17 via `brew install openjdk@17`, Android SDK in
+  `~/Android/Sdk` (cmdline-tools, platform-tools, platform 36, build-tools 36.0.0, NDK 30.0.16248370,
+  CMake 4.1.2). Needs `JAVA_HOME=/home/linuxbrew/.linuxbrew/opt/openjdk@17` and `ANDROID_HOME=$HOME/Android/Sdk`;
+  `./gradlew assembleDebug` succeeds (2m19s cold). `adb` symlinked to `~/.local/bin`. This machine's debug
+  keystore differs from the Windows one, so the first install needed an uninstall (app data was lost; the daemon's
+  files in /data/local/tmp survived).
+- **Versions recorded (unchanged since Sept):** Retroid input service `com.rp.mapping` versionName
+  `3.0 (20260721_153903)`, versionCode 1; firmware `RPN_V1.0.0.436_20260722_083524_user` (built 2026-07-22).
+  Device is a Retroid Pocket Nova, Android 13. Ignore list after the tests: CouchMode Virtual Gamepad,
+  Sony Computer Entertainment Wireless Controller, Wireless Controller, Nintendo Switch Pro Controller
+  (restored; the app's dev tools can only edit our own name, I used a temporary, uncommitted build to
+  remove and re-add the Switch Pro entry).
+- **Handheld Settings -> Input -> "New Controller Takeover Mode"** ("the taken-over controller supports
+  vibration; restart required"). It was OFF at the start of the session and probably during all the earlier
+  work. Not a `settings` key; stored in the Retroid settings app. Other settings seen: Advanced -> "Whitelist
+  application" (lets an app's foreground/background services run independently, i.e. a background-kill
+  exemption) and "Exclude key focus application" (empty list; purpose unknown, not touched).
+- **Test results (daemon OFF in the takeover-on tests):**
+  - Takeover OFF, daemon on, silent fake pad: the service made a copy (2022:3001 v0064) and hid the original
+    node (known behaviour).
+  - Takeover ON, silent fake pad: NOT copied, NOT hidden; presses show up in Android as the fake pad's own
+    device ("FakePadOne"), nothing on event7.
+  - Takeover ON, real Bluetooth Switch Pro (on the ignore list, then also OFF the list and re-connected):
+    plain device at event9 either way, no copy, nothing hidden. A full press test (A/B/X/Y, bumpers, triggers,
+    D-pad, sticks) put every event on the pad's own node and 0 events on the onboard controller (event7). The
+    Key Test screen named the pad itself. So takeover does NOT merge external pads into the onboard
+    controller at the evdev level. What it does do beyond stopping the copy is unknown; the description points
+    at vibration, which was not tested.
+  - **Takeover ON + our daemon running (Switch Pro active source):** Android sees "CouchMode Virtual Gamepad"
+    directly (Key Test: our name, Device ID 14), NO Retroid copy of ours, the pad's node is grabbed (0 events
+    on event9), all buttons/D-pad/left stick/triggers (as BRAKE/GAS) arrive on our virtual node, 0 on event7.
+    Right stick not exercised (Z/RZ unseen), so unverified.
+  - **Connect/disconnect watch (pad switched off, then on):** our device kept the same Android ID (15) and node
+    (event11) throughout; the Switch Pro came back as a new ID (13 -> 16); the daemon failed over to the
+    onboard pad and back without restarting; still exactly one CouchMode device, no clone. This is the
+    opposite of the old bug (2026-09-29 f). Unexplained: our ID was 14 on Key Test earlier and 15 at the
+    start of the watch although the daemon log shows only one "created virtual device".
+- **Bug found and fixed: right stick dead for every source.** The virtual gamepad copied the axes of whichever pad
+  it was created from; after this reboot that was the Switch Pro (X/Y/RX/RY, no Z/RZ), so the RX/RY -> Z/RZ remap
+  (and the onboard pad's own Z/RZ) were dropped by the kernel as undeclared. `create_virtual` in
+  `daemon/gamepad_merger.c` now always declares X, Y, Z, RZ (+ triggers and hat, as before). Confirmed with
+  `getevent -lp` after restarting the daemon, and Luke confirmed the right stick works. NOTE for testing: the
+  virtual device's axes are fixed at creation, so a daemon started from a different pad could have hidden this.
+  Files pushed with `adb push` to /sdcard/Download are not listed in the root-menu file picker (they exist,
+  wrong owner/not indexed); the start script's content is stable, so re-running an app-saved copy works.
+- **Rumble forwarding built (daemon).** Cause of "rumble stays on the internal motor": the virtual gamepad
+  declared no force feedback, so Android listed no vibrator for it (Dolphin showed no motor). Now declares
+  FF_RUMBLE + FF_GAIN (`ff_effects_max` 16; Android classes it VIBRATOR). The virtual device fd is opened
+  read/write and polled: uploads/erases/plays/gain from Android are replayed on the ACTIVE source (effects are
+  numbered per source, uploaded lazily on first play, reset when the source changes). Sources are now opened
+  read/write (read-only fallback). Sources that can't rumble (the Retroid onboard pad has no FF at evdev
+  level; its motor is driven by the vendor service) just ignore it, so on the onboard pad rumble still goes to
+  the internal motor as before. **Bug on the way:** the daemon forwarded EVERY source event type, so
+  force-feedback events echoed back from the pad were written into the virtual device and re-triggered the
+  play (~30 ms loop, 14-41 plays per request). Fixed by dropping EV_FF in `pump_source`. Test tool:
+  `tools/test/ffplay.c` (uploads one FF_RUMBLE effect to a given node and plays it; no button input).
+- **Stop service (new).** Daemon command `QUIT` (clean exit: releases the pad, destroys the virtual gamepad, keeps
+  saved settings) and an app menu item (⋮ -> Stop service, with a confirmation; only shown while the daemon runs).
+  The running daemon must be restarted once (root script) before the button works. Restarting still needs the root tap.
+  Verified by Luke on the device: starting (root script) and stopping (Stop service) both work.
+- **Rumble status at end of day: forwarding is verified up to the pad, but no strong rumble was ever felt.**
+  Dolphin's rumble requests reach the daemon (31 plays of strong=weak=49152, 100 ms from one session) and are
+  written to the Switch Pro without errors. Driving the Switch Pro DIRECTLY (daemon released it via the priority
+  list, effect uploaded straight to its event node, single play and a play re-sent every 40 ms, full strength,
+  1.5 s) gave only faint/occasional pulses. Luke says that is far below the pad's real strength, and Dolphin bound
+  directly to the pad (daemon off) also did not rumble, even after a reboot and clearing Dolphin's settings. So
+  the weakness is not in our forwarding. Suspects: the Switch Pro / hid-nintendo (kernel 5.15.123, CONFIG_HID_NINTENDO=y)
+  over Android's Bluetooth stack, or the takeover mode. **Next (tomorrow): try another pad type** (DS4 over BT
+  or USB uses hid-sony with SONY_FF=y, or the 8BitDo) through the full chain with `tools/test/ffplay`; if that also
+  fails, flip takeover off and repeat.
+- Not tested: Dolphin rumble on a second pad type; rumble on the onboard motor (needs a way to reach the vendor
+  service); Dolphin on the onboard pad with takeover on. The ignore
+  list looks unnecessary with takeover on (pads were not copied either way), but it is left in place.
+  Open question for Luke: keep takeover on or off for CouchMode; if on, the Retroid-compat workarounds
+  (ignore list, decoy) may be removable.
+- Wireless debugging lost its route after a reboot (handheld advertised via mDNS but ARP failed); USB worked.
+
 ### 2026-09-30 (j) - first USB controller test (Claude Code, over wireless debugging)
 
 Plugging a USB pad into the handheld's USB-C port drops the adb-over-USB connection (same port), so
