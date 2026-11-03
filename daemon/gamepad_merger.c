@@ -141,6 +141,13 @@ static const char *g_virtual_name = DEFAULT_VIRTUAL_NAME;
 
 static int g_src = -1;             // grabbed source device, or -1 if not present
 static int g_ui = -1;              // uinput fd; created once, kept for the process lifetime
+// Rumble. Android uploads FF_RUMBLE effects to the virtual device; we keep them here and replay them on
+// the active source pad (which numbers its own effects), see pump_ff().
+#define CM_FF_EFFECTS 16
+static struct ff_effect g_ff_eff[CM_FF_EFFECTS];  // effects the app uploaded to the virtual device
+static int g_ff_have[CM_FF_EFFECTS];
+static int g_ff_sid[CM_FF_EFFECTS];  // same effect's id on the current source, -1 = not uploaded there
+static int g_src_ff = 0;              // the current source can rumble and was opened for writing
 static int g_decoy = -1;           // decoy gamepad, see create_decoy()
 static int g_use_decoy = 1;        // saved option: create the decoy at startup
 static int g_dropping = 0;         // discarding events until the next SYN_REPORT after SYN_DROPPED
@@ -309,7 +316,9 @@ static int open_by_name(const char *name, const char *id, const char *uniq) {
         if (strncmp(e->d_name, "event", 5) != 0) continue;
         char path[64];
         snprintf(path, sizeof(path), "/dev/input/%s", e->d_name);
-        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        // Read/write so a chosen source can be sent rumble; fall back to read-only if not permitted.
+        int fd = open(path, O_RDWR | O_CLOEXEC);
+        if (fd < 0) fd = open(path, O_RDONLY | O_CLOEXEC);
         if (fd < 0) continue;
         char devname[NAME_LEN] = {0};
         struct input_id iid;
@@ -358,7 +367,10 @@ static int looks_like_gamepad(int fd) {
 // Creates a uinput device declaring the same keys/axes as `src`. Returns the fd or -1.
 static int create_virtual_from(int src, const char *vname) {
     g_nkeys = g_naxes = 0;
-    int ui = open("/dev/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    memset(g_ff_have, 0, sizeof(g_ff_have));
+    for (int i = 0; i < CM_FF_EFFECTS; i++) g_ff_sid[i] = -1;
+    // Read/write: Android's rumble requests come back to us as events on this fd (see pump_ff).
+    int ui = open("/dev/uinput", O_RDWR | O_NONBLOCK | O_CLOEXEC);
     if (ui < 0) {
         logf_("open /dev/uinput: %s", strerror(errno));
         return -1;
@@ -458,12 +470,43 @@ static int create_virtual_from(int src, const char *vname) {
         g_dmax[code] = 1;
     }
 
+    // ...and both sticks on the Android layout (X/Y left, Z/RZ right). A Linux-layout source such as the
+    // Switch Pro only declares X/Y/RX/RY, so without this the right stick, which is remapped onto Z/RZ,
+    // would be dropped by the kernel because the axis was never declared.
+    for (int i = 0; i < 4; i++) {
+        static const int sticks[4] = {ABS_X, ABS_Y, ABS_Z, ABS_RZ};
+        int code = sticks[i];
+        unsigned long have[NLONGS(ABS_MAX + 1)] = {0};
+        ioctl(src, EVIOCGBIT(EV_ABS, sizeof(have)), have);
+        if (TEST_BIT(code, have)) continue;  // already declared from the source above
+        struct uinput_abs_setup as;
+        memset(&as, 0, sizeof(as));
+        as.code = code;
+        as.absinfo.minimum = -32767;
+        as.absinfo.maximum = 32767;
+        as.absinfo.fuzz = 250;
+        as.absinfo.flat = 500;
+        if (ioctl(ui, UI_SET_ABSBIT, code) < 0 || ioctl(ui, UI_ABS_SETUP, &as) < 0) {
+            logf_("stick abs setup %d: %s", code, strerror(errno));
+            goto fail;
+        }
+        g_axes[g_naxes++] = code;
+        g_dmin[code] = -32767;
+        g_dmax[code] = 32767;
+    }
+
+    // Rumble: declaring FF_RUMBLE is what makes Android (and Dolphin) list a motor for this device.
+    ioctl(ui, UI_SET_EVBIT, EV_FF);
+    ioctl(ui, UI_SET_FFBIT, FF_RUMBLE);
+    ioctl(ui, UI_SET_FFBIT, FF_GAIN);
+
     struct uinput_setup us;
     memset(&us, 0, sizeof(us));
     us.id.bustype = BUS_VIRTUAL;
     us.id.vendor = VIRTUAL_VENDOR;
     us.id.product = VIRTUAL_PRODUCT;
     us.id.version = VIRTUAL_VERSION;
+    us.ff_effects_max = CM_FF_EFFECTS;
     snprintf(us.name, UINPUT_MAX_NAME_SIZE, "%s", vname);
     if (ioctl(ui, UI_DEV_SETUP, &us) < 0 || ioctl(ui, UI_DEV_CREATE) < 0) {
         logf_("UI_DEV_SETUP/CREATE: %s", strerror(errno));
@@ -918,6 +961,12 @@ static void handle_line(struct client *c, char *line) {
     } else if (strcmp(line, "RECREATE") == 0) {
         recreate_virtual();
         send_str(c->fd, "OK\n");
+    } else if (strcmp(line, "QUIT") == 0) {
+        // Clean shutdown: the main loop ends, the source is released and the virtual gamepad destroyed.
+        // Saved settings (priority list, button maps) are kept. Starting again needs the root script.
+        logf_("quit requested by a client");
+        send_str(c->fd, "OK\n");
+        g_stop = 1;
     } else if (strncmp(line, "MUTE ", 5) == 0 && (line[5] == '0' || line[5] == '1') && line[6] == 0) {
         c->mute = line[5] == '1';
         send_str(c->fd, "OK\n");
@@ -1065,8 +1114,10 @@ static void reset_virtual(void) {
 static void detach_source(void) {
     if (g_src >= 0) {
         ioctl(g_src, EVIOCGRAB, 0);
-        close(g_src);
+        close(g_src);  // also frees any effects we uploaded to it
         g_src = -1;
+        g_src_ff = 0;
+        for (int i = 0; i < CM_FF_EFFECTS; i++) g_ff_sid[i] = -1;
         reset_virtual();
         // Clients tapping the forwarded stream are now watching the wrong device.
         for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -1142,6 +1193,12 @@ static int attach_entry(int idx) {
     g_src = src;
     g_active = idx;
     g_dropping = 0;
+    // Can this source rumble? It must declare FF_RUMBLE and we must have it open for writing.
+    unsigned long ffbits[NLONGS(FF_MAX + 1)] = {0};
+    g_src_ff = (fcntl(src, F_GETFL) & O_ACCMODE) == O_RDWR &&
+               ioctl(src, EVIOCGBIT(EV_FF, sizeof(ffbits)), ffbits) >= 0 && TEST_BIT(FF_RUMBLE, ffbits);
+    for (int i = 0; i < CM_FF_EFFECTS; i++) g_ff_sid[i] = -1;
+    logf_("rumble: %s", g_src_ff ? "source supports it, forwarding" : "source can't rumble (ignored)");
     refresh_cur_map();
     reset_virtual();
     return 0;
@@ -1221,6 +1278,9 @@ static int pump_source(void) {
             if (ev->type == EV_SYN && ev->code == SYN_REPORT) g_dropping = 0;
             continue;
         }
+        // Never forward force-feedback events from the source: written to the virtual device they would
+        // look like a new rumble request from Android, which we would send back to the pad (a loop).
+        if (ev->type == EV_FF) continue;
         // uinput stamps its own time; pass type/code/value only.
         struct input_event out;
         memset(&out, 0, sizeof(out));
@@ -1303,6 +1363,90 @@ static int pump_source(void) {
     return 0;
 }
 
+// ---- rumble ---------------------------------------------------------------
+// Android treats the virtual gamepad as a rumble-capable device and writes FF_RUMBLE effects to it.
+// uinput hands those requests back to us as events on g_ui. We keep the effect, and when the app
+// plays it we upload it to the active source pad (which has its own effect numbering) and play it
+// there. Pads that can't rumble (e.g. the Retroid's onboard controls, which are driven by the
+// vendor service) just ignore it.
+
+// Uploads (or updates) our effect `id` on the current source. Returns 0 on success.
+static int ff_to_source(int id) {
+    if (!g_src_ff || g_src < 0 || !g_ff_have[id] || g_ff_eff[id].type != FF_RUMBLE) return -1;
+    struct ff_effect e = g_ff_eff[id];
+    e.id = g_ff_sid[id];  // -1 = new
+    if (ioctl(g_src, EVIOCSFF, &e) < 0) {
+        logf_("rumble: upload to source failed: %s", strerror(errno));
+        return -1;
+    }
+    g_ff_sid[id] = e.id;
+    return 0;
+}
+
+static void ff_write_source(int code, int value) {
+    struct input_event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = EV_FF;
+    ev.code = code;
+    ev.value = value;
+    if (write(g_src, &ev, sizeof(ev)) < 0 && errno != EAGAIN && errno != EINTR)
+        logf_("rumble: write to source failed: %s", strerror(errno));
+}
+
+static void pump_ff(void) {
+    struct input_event ev;
+    for (;;) {
+        ssize_t n = read(g_ui, &ev, sizeof(ev));
+        if (n != (ssize_t)sizeof(ev)) {
+            if (n < 0 && errno == EINTR) continue;
+            return;  // EAGAIN: drained
+        }
+        if (ev.type == EV_UINPUT && ev.code == UI_FF_UPLOAD) {
+            struct uinput_ff_upload up;
+            memset(&up, 0, sizeof(up));
+            up.request_id = ev.value;
+            if (ioctl(g_ui, UI_BEGIN_FF_UPLOAD, &up) < 0) continue;
+            int id = up.effect.id;
+            if (id >= 0 && id < CM_FF_EFFECTS) {
+                g_ff_eff[id] = up.effect;
+                g_ff_have[id] = 1;
+                if (g_ff_sid[id] >= 0) ff_to_source(id);  // already on the source: update it there too
+            }
+            up.retval = 0;
+            ioctl(g_ui, UI_END_FF_UPLOAD, &up);
+        } else if (ev.type == EV_UINPUT && ev.code == UI_FF_ERASE) {
+            struct uinput_ff_erase er;
+            memset(&er, 0, sizeof(er));
+            er.request_id = ev.value;
+            if (ioctl(g_ui, UI_BEGIN_FF_ERASE, &er) < 0) continue;
+            int id = (int)er.effect_id;
+            if (id >= 0 && id < CM_FF_EFFECTS) {
+                if (g_ff_sid[id] >= 0 && g_src >= 0) ioctl(g_src, EVIOCRMFF, g_ff_sid[id]);
+                g_ff_sid[id] = -1;
+                g_ff_have[id] = 0;
+            }
+            er.retval = 0;
+            ioctl(g_ui, UI_END_FF_ERASE, &er);
+        } else if (ev.type == EV_FF) {
+            if (!g_src_ff || g_src < 0) continue;
+            if (ev.code == FF_GAIN) {
+                ff_write_source(FF_GAIN, ev.value);
+            } else if (ev.code < CM_FF_EFFECTS) {
+                int id = ev.code;
+                if (ev.value > 0) {
+                    if (g_ff_sid[id] < 0 && ff_to_source(id) < 0) continue;
+                    logf_("rumble: play effect %d (strong %u, weak %u, %u ms) x%d", id,
+                          g_ff_eff[id].u.rumble.strong_magnitude, g_ff_eff[id].u.rumble.weak_magnitude,
+                          g_ff_eff[id].replay.length, ev.value);
+                    ff_write_source(g_ff_sid[id], ev.value);
+                } else if (g_ff_sid[id] >= 0) {
+                    ff_write_source(g_ff_sid[id], 0);  // stop
+                }
+            }
+        }
+    }
+}
+
 // A sniffed (non-source) device became readable: stream its key/abs events.
 static void pump_sniff(struct client *c) {
     struct input_event evs[64];
@@ -1372,12 +1516,13 @@ int main(int argc, char **argv) {
         }
 
         // pfds: [0] listen, [1] source, then per client: client fd, sniff fd.
-        struct pollfd pfds[2 + MAX_CLIENTS * 2];
-        int owner[2 + MAX_CLIENTS * 2];  // client index, or -1
-        int kind[2 + MAX_CLIENTS * 2];   // 0 listen, 1 source, 2 client, 3 sniff
+        struct pollfd pfds[3 + MAX_CLIENTS * 2];
+        int owner[3 + MAX_CLIENTS * 2];  // client index, or -1
+        int kind[3 + MAX_CLIENTS * 2];   // 0 listen, 1 source, 2 client, 3 sniff, 4 virtual device (rumble requests)
         int np = 0;
         pfds[np] = (struct pollfd){lfd, POLLIN, 0}; owner[np] = -1; kind[np++] = 0;
         if (g_src >= 0) { pfds[np] = (struct pollfd){g_src, POLLIN, 0}; owner[np] = -1; kind[np++] = 1; }
+        if (g_ui >= 0) { pfds[np] = (struct pollfd){g_ui, POLLIN, 0}; owner[np] = -1; kind[np++] = 4; }
         for (int i = 0; i < MAX_CLIENTS; i++) {
             if (g_clients[i].fd < 0) continue;
             pfds[np] = (struct pollfd){g_clients[i].fd, POLLIN, 0}; owner[np] = i; kind[np++] = 2;
@@ -1412,6 +1557,10 @@ int main(int argc, char **argv) {
                     break;
                 case 3:
                     if (c->fd >= 0 && c->sniff_fd == pfds[p].fd) pump_sniff(c);
+                    break;
+                case 4:
+                    // The virtual device may have been recreated by a client command this round.
+                    if (g_ui == pfds[p].fd && (pfds[p].revents & POLLIN)) pump_ff();
                     break;
             }
         }

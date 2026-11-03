@@ -70,6 +70,7 @@ class MainActivity : ComponentActivity() {
                             onAddController = { screen = Screen.AddController },
                             onOpenDeveloperTools = { screen = Screen.DeveloperTools },
                             onSetRetroidCompat = viewModel::setRetroidCompatEnabled,
+                            onStopService = viewModel::stopDaemon,
                             onOpenWizard = {
                                 wizardKey = it.nameKey()
                                 screen = Screen.Wizard

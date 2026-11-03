@@ -82,12 +82,34 @@ fun ControllerListScreen(
     onAddController: () -> Unit,
     onOpenDeveloperTools: () -> Unit,
     onSetRetroidCompat: (Boolean) -> Unit,
+    onStopService: () -> Unit,
     onOpenWizard: (PriorityEntry) -> Unit,
     onSetUserName: (key: String, name: String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    var confirmStop by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<PriorityEntry?>(null) }
+    if (confirmStop) {
+        AlertDialog(
+            onDismissRequest = { confirmStop = false },
+            title = { Text("Stop the CouchMode service?") },
+            text = {
+                Text(
+                    "Your controllers go back to working directly with apps, and the combined " +
+                        "controller disappears. Your settings are kept. To start it again you have to " +
+                        "run the start script once from the handheld's root menu.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmStop = false
+                    onStopService()
+                }) { Text("Stop") }
+            },
+            dismissButton = { TextButton(onClick = { confirmStop = false }) { Text("Cancel") } },
+        )
+    }
     renaming?.let { entry ->
         RenameDialog(
             current = state.userNames[entry.nameKey()].orEmpty(),
@@ -109,6 +131,15 @@ fun ControllerListScreen(
                         Icon(Icons.Default.MoreVert, contentDescription = "More")
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        if (state.daemonRunning == true) {
+                            DropdownMenuItem(
+                                text = { Text("Stop service") },
+                                onClick = {
+                                    menuOpen = false
+                                    confirmStop = true
+                                },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text("Developer tools") },
                             onClick = {

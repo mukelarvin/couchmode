@@ -120,6 +120,14 @@ object DaemonClient {
         check(request("DECOY ${if (on) 1 else 0}").firstOrNull() == "OK") { "daemon rejected DECOY" }
     }
 
+    /**
+     * Shuts the daemon down: it releases the controller it holds and removes the virtual gamepad.
+     * Saved settings are kept; starting it again needs the root script.
+     */
+    suspend fun quit() {
+        check(request("QUIT").firstOrNull() == "OK") { "daemon rejected QUIT" }
+    }
+
     /** Makes the daemon destroy and re-create its virtual gamepad (a one-time renumbering for apps). */
     suspend fun recreateVirtual() {
         check(request("RECREATE").firstOrNull() == "OK") { "daemon rejected RECREATE" }

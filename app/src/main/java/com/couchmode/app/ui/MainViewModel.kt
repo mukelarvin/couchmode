@@ -131,6 +131,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         refreshNow.tryEmit(Unit)
     }
 
+    /** Stops the daemon. The home screen then shows how to start it again. */
+    fun stopDaemon() {
+        viewModelScope.launch {
+            runCatching { DaemonClient.quit() }
+            kotlinx.coroutines.delay(600)  // let it exit before the next poll
+            refreshNow.tryEmit(Unit)
+        }
+    }
+
     /** Saves a new priority list (highest first). The daemon persists it and switches sources. */
     fun setPriority(entries: List<PriorityEntry>) {
         optimisticPriority.value = entries
