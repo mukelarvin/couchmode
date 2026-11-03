@@ -47,6 +47,22 @@ just status + resume points, not the design doc.
   (`adb shell ls -l /dev/uinput /dev/input/event*` — not yet run).
 - Static vs. connection-driven priority reordering in the UI.
 
+### Versions the Retroid-specific findings were made against
+
+Everything about the Retroid input service (ignore-list API, transaction numbers, the single-device
+"hold", copies, the `persist.sys.gamepad.type` mode property, device names/IDs) was read from and
+tested on exactly this build. A firmware or app update can change any of it, so re-check after one.
+
+- Device: Retroid Pocket Nova (`ro.product.model`), SoC "kalama" (Snapdragon 8 Gen 2), Android 13.
+- **RsMapping** (`com.rp.mapping`, "RsMapper"): `versionName=3.0(20260721_153903)`, installed at
+  `/system/app/RsMapping/RsMapping.apk` (system app, runs as uid system, native lib `librsinput.so`).
+- RPSettings (`com.rp.settings`, `/system/app/RPSettings/RPSettings.apk`): version NOT recorded.
+- Firmware build id: NOT recorded.
+- To record the missing ones when the device is connected:
+  `adb shell dumpsys package com.rp.settings | grep versionName`,
+  `adb shell getprop ro.build.display.id`, `adb shell getprop ro.build.fingerprint`, and
+  `adb shell dumpsys package com.rp.mapping | grep versionName` to confirm RsMapping.
+
 ## Session log
 
 ### 2026-09-30 (j) - first USB controller test (Claude Code, over wireless debugging)
